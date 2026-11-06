@@ -2230,10 +2230,15 @@
             </svg>
           </div>
           <div>
-            <div class="flex items-center gap-2.5">
+            <div class="flex flex-wrap items-center gap-2.5">
               <h2 class="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 dark:text-white uppercase">USER MANAGEMENT &amp; SETTINGS</h2>
               <span id="users-count-badge" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800 shadow-2xs">3 Users</span>
+              <span id="users-firebase-sync-badge" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800 shadow-2xs">
+                <span id="users-firebase-sync-dot" class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span id="users-firebase-sync-text">Firebase Connected</span>
+              </span>
             </div>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Manage platform accounts, login credentials, and role-based dashboard access synced live with Firebase Cloud Firestore (<code class="font-mono text-[11px]">ash_settings/ash-user</code>).</p>
           </div>
         </div>
 
@@ -2550,49 +2555,181 @@
           isFirebaseReady = true;
           console.log('Firebase Cloud Firestore initialized successfully:', firebaseConfig.projectId);
           initUsersRealtimeListener();
+          initEmployeeStatusRealtimeListener();
+          initDashboardDataRealtimeListener();
         }
       } catch (e) {
         console.warn('Firebase initialization skipped or failed:', e);
       }
     }
 
-    // Save Employee Status to Firebase Cloud Firestore
-    async function saveEmployeeStatusToFirebase() {
-      if (!isFirebaseReady || !firestoreDb) return false;
-      try {
-        await firestoreDb.collection('ash_settings').doc('employee_status').set({
-          statuses: employeeStatusCache || {},
-          filterMode: employeeFilterMode || 'active',
-          updatedAt: new Date().toISOString(),
-          updatedBy: (currentUser && currentUser.fullName) ? currentUser.fullName : 'Admin'
-        }, { merge: true });
-        console.log('Employee status successfully saved to Firebase Cloud Firestore.');
-        return true;
-      } catch (e) {
-        console.warn('Failed to save employee status to Firebase:', e);
-        return false;
+    // Universal Firestore REST Value Converters (for fallback & verification)
+    function toFirestoreRestValue(val) {
+      if (val === null || val === undefined) return { nullValue: null };
+      if (typeof val === 'string') return { stringValue: val };
+      if (typeof val === 'boolean') return { booleanValue: val };
+      if (typeof val === 'number') {
+        return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
       }
+      if (Array.isArray(val)) {
+        return { arrayValue: { values: val.map(toFirestoreRestValue) } };
+      }
+      if (typeof val === 'object') {
+        const fields = {};
+        for (const [k, v] of Object.entries(val)) {
+          if (k && v !== undefined) fields[k] = toFirestoreRestValue(v);
+        }
+        return { mapValue: { fields } };
+      }
+      return { stringValue: String(val) };
     }
 
-    // Load Employee Status from Firebase Cloud Firestore
-    async function loadEmployeeStatusFromFirebase() {
-      if (!isFirebaseReady || !firestoreDb) return false;
+    function fromFirestoreRestValue(v) {
+      if (!v || typeof v !== 'object') return null;
+      if ('stringValue' in v) return v.stringValue;
+      if ('booleanValue' in v) return Boolean(v.booleanValue);
+      if ('integerValue' in v) return Number(v.integerValue);
+      if ('doubleValue' in v) return Number(v.doubleValue);
+      if ('nullValue' in v) return null;
+      if ('timestampValue' in v) return v.timestampValue;
+      if ('arrayValue' in v) {
+        return (v.arrayValue && Array.isArray(v.arrayValue.values))
+          ? v.arrayValue.values.map(fromFirestoreRestValue)
+          : [];
+      }
+      if ('mapValue' in v) {
+        const out = {};
+        const fields = (v.mapValue && v.mapValue.fields) || {};
+        for (const [k, fv] of Object.entries(fields)) {
+          out[k] = fromFirestoreRestValue(fv);
+        }
+        return out;
+      }
+      return null;
+    }
+
+    function fromFirestoreRestDocument(docJson) {
+      if (!docJson || !docJson.fields) return null;
+      const out = {};
+      for (const [k, fv] of Object.entries(docJson.fields)) {
+        out[k] = fromFirestoreRestValue(fv);
+      }
+      return out;
+    }
+
+    // Normalize & deduplicate Employee Status map keys using canonical staff names
+    function normalizeEmployeeStatusMap(rawStatuses) {
+      const normalized = {};
+      if (!rawStatuses || typeof rawStatuses !== 'object') return normalized;
+      for (const [rawKey, rawVal] of Object.entries(rawStatuses)) {
+        if (!rawVal || typeof rawVal !== 'object') continue;
+        const canon = typeof canonicalizeStaffName === 'function' ? canonicalizeStaffName(rawKey) : rawKey.trim();
+        if (!canon) continue;
+        const isExactCanon = (rawKey.trim() === canon);
+        if (!normalized[canon] || isExactCanon) {
+          normalized[canon] = {
+            active: rawVal.active !== false,
+            department: typeof canonicalizeDepartment === 'function' ? canonicalizeDepartment(rawVal.department, canon) : (rawVal.department || 'Staff'),
+            designation: typeof canonicalizeDesignation === 'function' ? canonicalizeDesignation(rawVal.designation, canon) : (rawVal.designation || 'Team Member')
+          };
+        }
+      }
+      return normalized;
+    }
+
+    // Save Employee Status to Firebase Cloud Firestore (SDK + REST Fallback)
+    async function saveEmployeeStatusToFirebase() {
+      initFirebaseModule();
+      const cleanStatuses = normalizeEmployeeStatusMap(employeeStatusCache || {});
+      employeeStatusCache = Object.assign({}, cleanStatuses);
+      const payload = {
+        statuses: cleanStatuses,
+        filterMode: employeeFilterMode || 'active',
+        updatedAt: new Date().toISOString(),
+        updatedBy: (currentUser && currentUser.fullName) ? currentUser.fullName : 'Admin'
+      };
+
+      let saved = false;
+      if (isFirebaseReady && firestoreDb) {
+        try {
+          await firestoreDb.collection('ash_settings').doc('employee_status').set(payload);
+          saved = true;
+          console.log('Employee status successfully saved to Firebase Cloud Firestore (SDK).');
+        } catch (e) {
+          console.warn('SDK write to ash_settings/employee_status failed, trying REST:', e);
+        }
+      }
+
+      // Also persist via Firestore REST API to guarantee cloud sync
       try {
-        const docSnap = await firestoreDb.collection('ash_settings').doc('employee_status').get();
-        if (docSnap.exists) {
-          const data = docSnap.data();
-          if (data && data.statuses && typeof data.statuses === 'object') {
-            employeeStatusCache = Object.assign({}, employeeStatusCache || {}, data.statuses);
-            if (data.filterMode) employeeFilterMode = data.filterMode;
-            saveEmployeeStatusCache();
-            renderEmpStatusDashboardView();
-            renderSidebarEmployeeDirectory();
-            console.log('Employee status synced from Firebase Cloud Firestore.');
+        const restFields = {};
+        for (const [k, v] of Object.entries(payload)) {
+          restFields[k] = toFirestoreRestValue(v);
+        }
+        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
+        const res = await fetch(restUrl, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: restFields })
+        });
+        if (res.ok) saved = true;
+      } catch (e) {
+        console.warn('REST write to ash_settings/employee_status warning:', e);
+      }
+
+      return saved;
+    }
+
+    // Apply incoming Firebase employee status data across all dashboard modules
+    function applyIncomingFirebaseEmployeeStatus(data) {
+      if (!data || !data.statuses || typeof data.statuses !== 'object') return false;
+      const incomingNormalized = normalizeEmployeeStatusMap(data.statuses);
+      const existingNormalized = normalizeEmployeeStatusMap(employeeStatusCache || {});
+      employeeStatusCache = Object.assign({}, existingNormalized, incomingNormalized);
+      if (data.filterMode === 'all' || data.filterMode === 'active') {
+        employeeFilterMode = data.filterMode;
+      }
+      saveEmployeeStatusCache();
+      if (typeof onEmployeeStatusUpdated === 'function') {
+        onEmployeeStatusUpdated();
+      } else {
+        renderEmpStatusDashboardView();
+        renderSidebarEmployeeDirectory();
+      }
+      return true;
+    }
+
+    // Load Employee Status from Firebase Cloud Firestore (SDK + REST Fallback)
+    async function loadEmployeeStatusFromFirebase() {
+      initFirebaseModule();
+      if (isFirebaseReady && firestoreDb) {
+        try {
+          const docSnap = await firestoreDb.collection('ash_settings').doc('employee_status').get();
+          if (docSnap.exists) {
+            const data = docSnap.data();
+            if (applyIncomingFirebaseEmployeeStatus(data)) {
+              console.log('Employee status synced from Firebase Cloud Firestore (SDK).');
+              return true;
+            }
+          }
+        } catch (e) {
+          console.warn('SDK load of employee status failed, trying REST fallback:', e);
+        }
+      }
+
+      try {
+        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
+        const res = await fetch(restUrl);
+        if (res.ok) {
+          const docJson = await res.json();
+          const data = fromFirestoreRestDocument(docJson);
+          if (applyIncomingFirebaseEmployeeStatus(data)) {
+            console.log('Employee status synced from Firebase Cloud Firestore (REST).');
             return true;
           }
         }
       } catch (e) {
-        console.warn('Failed to load employee status from Firebase:', e);
+        console.warn('Failed to load employee status from Firebase REST:', e);
       }
       return false;
     }
@@ -2608,11 +2745,7 @@
               const data = docSnap.data();
               if (data && data.statuses && typeof data.statuses === 'object') {
                 if (!hasUnsavedEmpStatusChanges) {
-                  employeeStatusCache = Object.assign({}, employeeStatusCache || {}, data.statuses);
-                  if (data.filterMode) employeeFilterMode = data.filterMode;
-                  saveEmployeeStatusCache();
-                  renderEmpStatusDashboardView();
-                  renderSidebarEmployeeDirectory();
+                  applyIncomingFirebaseEmployeeStatus(data);
                 }
               }
             }
@@ -2624,40 +2757,110 @@
       }
     }
 
-    // Save Live Dashboard Data to Firebase Cloud Firestore
+    // Save Live Dashboard Data to Firebase Cloud Firestore (Dashboard -> Firebase)
     async function saveLiveDashboardDataToFirebase(liveData) {
-      if (!isFirebaseReady || !firestoreDb || !liveData || !liveData.sheets) return false;
-      try {
-        await firestoreDb.collection('ash_dashboard').doc('latest_data').set({
-          generatedAt: liveData.generatedAt || new Date().toISOString(),
-          spreadsheetId: liveData.spreadsheetId || '',
-          spreadsheetName: liveData.spreadsheetName || 'ASH ACADEMY',
-          sheets: liveData.sheets,
-          savedAt: new Date().toISOString()
-        }, { merge: true });
-        console.log('Live dashboard data successfully cached to Firebase Cloud Firestore.');
-        return true;
-      } catch (e) {
-        console.warn('Failed to cache dashboard data to Firebase:', e);
-        return false;
+      if (!liveData || !liveData.sheets) return false;
+      initFirebaseModule();
+
+      const sanitizedSheets = JSON.parse(JSON.stringify(liveData.sheets));
+      const payload = {
+        generatedAt: liveData.generatedAt || new Date().toISOString(),
+        spreadsheetId: liveData.spreadsheetId || '',
+        spreadsheetName: liveData.spreadsheetName || 'ASH ACADEMY',
+        sheets: sanitizedSheets,
+        savedAt: new Date().toISOString()
+      };
+
+      if (isFirebaseReady && firestoreDb) {
+        try {
+          await firestoreDb.collection('ash_dashboard').doc('latest_data').set(payload);
+          console.log('Live dashboard data successfully cached to Firebase Cloud Firestore (SDK).');
+          return true;
+        } catch (e) {
+          console.warn('SDK cache of dashboard data to Firebase failed, trying REST:', e);
+        }
       }
+
+      try {
+        const restFields = {};
+        for (const [k, v] of Object.entries(payload)) {
+          restFields[k] = toFirestoreRestValue(v);
+        }
+        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
+        const res = await fetch(restUrl, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: restFields })
+        });
+        if (res.ok) {
+          console.log('Live dashboard data successfully cached to Firebase Cloud Firestore (REST).');
+          return true;
+        }
+      } catch (e) {
+        console.warn('Failed to cache dashboard data to Firebase REST:', e);
+      }
+      return false;
     }
 
-    // Load Live Dashboard Data from Firebase Cloud Firestore
+    // Load Live Dashboard Data from Firebase Cloud Firestore (Firebase -> Dashboard)
     async function loadLiveDashboardDataFromFirebase() {
-      if (!isFirebaseReady || !firestoreDb) return null;
+      initFirebaseModule();
+      if (isFirebaseReady && firestoreDb) {
+        try {
+          const docSnap = await firestoreDb.collection('ash_dashboard').doc('latest_data').get();
+          if (docSnap.exists) {
+            const data = docSnap.data();
+            if (data && data.sheets && typeof data.sheets === 'object') {
+              return data;
+            }
+          }
+        } catch (e) {
+          console.warn('Firebase SDK dashboard cache load warning, trying REST:', e);
+        }
+      }
+
       try {
-        const docSnap = await firestoreDb.collection('ash_dashboard').doc('latest_data').get();
-        if (docSnap.exists) {
-          const data = docSnap.data();
+        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
+        const res = await fetch(restUrl);
+        if (res.ok) {
+          const docJson = await res.json();
+          const data = fromFirestoreRestDocument(docJson);
           if (data && data.sheets && typeof data.sheets === 'object') {
             return data;
           }
         }
       } catch (e) {
-        console.warn('Firebase dashboard cache load warning:', e);
+        console.warn('Firebase REST dashboard cache load warning:', e);
       }
       return null;
+    }
+
+    // Realtime Listener for Live Dashboard Data updates from Firebase
+    let dashboardDataUnsubscribe = null;
+    let lastAppliedFirestoreSavedAt = '';
+    function initDashboardDataRealtimeListener() {
+      if (!isFirebaseReady || !firestoreDb || dashboardDataUnsubscribe) return;
+      try {
+        dashboardDataUnsubscribe = firestoreDb.collection('ash_dashboard').doc('latest_data')
+          .onSnapshot(docSnap => {
+            if (docSnap && docSnap.exists) {
+              const data = docSnap.data();
+              if (data && data.sheets && typeof data.sheets === 'object') {
+                const incomingSavedAt = data.savedAt || data.generatedAt || '';
+                if (incomingSavedAt && incomingSavedAt !== lastAppliedFirestoreSavedAt) {
+                  lastAppliedFirestoreSavedAt = incomingSavedAt;
+                  if (allProcessedRows && allProcessedRows.length === 0) {
+                    processAndRenderPayload(data);
+                  }
+                }
+              }
+            }
+          }, err => {
+            console.warn('Dashboard data realtime listener warning:', err);
+          });
+      } catch (e) {
+        console.warn('Failed to start dashboard data realtime listener:', e);
+      }
     }
 
     /* ==========================================================================
@@ -2688,9 +2891,9 @@
       const fullName = u.fullName || u.name || username;
       let dashboards = [];
       if (Array.isArray(u.allowedDashboards)) {
-        dashboards = u.allowedDashboards;
+        dashboards = u.allowedDashboards.filter(Boolean);
       } else if (u.permissions && Array.isArray(u.permissions.dashboards)) {
-        dashboards = u.permissions.dashboards;
+        dashboards = u.permissions.dashboards.filter(Boolean);
       } else {
         dashboards = ['overview'];
       }
@@ -2728,9 +2931,9 @@
       if (!v || !v.mapValue || !v.mapValue.fields) return null;
       const f = v.mapValue.fields;
       const dashboards = (f.permissions && f.permissions.mapValue && f.permissions.mapValue.fields && f.permissions.mapValue.fields.dashboards && f.permissions.mapValue.fields.dashboards.arrayValue && f.permissions.mapValue.fields.dashboards.arrayValue.values)
-        ? f.permissions.mapValue.fields.dashboards.arrayValue.values.map(d => d.stringValue)
+        ? f.permissions.mapValue.fields.dashboards.arrayValue.values.map(d => d.stringValue).filter(Boolean)
         : ((f.allowedDashboards && f.allowedDashboards.arrayValue && f.allowedDashboards.arrayValue.values)
-          ? f.allowedDashboards.arrayValue.values.map(d => d.stringValue)
+          ? f.allowedDashboards.arrayValue.values.map(d => d.stringValue).filter(Boolean)
           : ['overview']);
 
       const raw = {
@@ -2754,42 +2957,79 @@
       return normalizeAshUser(raw);
     }
 
+    function deduplicateUsersList(list) {
+      const seen = new Set();
+      const result = [];
+      for (const item of list) {
+        if (!item || !item.username) continue;
+        const key = item.username.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(item);
+        }
+      }
+      return result;
+    }
+
     function extractUsersFromDocData(data) {
       if (!data) return [];
+      // 1. Authoritative canonical 'users' array first
+      if (Array.isArray(data.users) && data.users.length > 0) {
+        const fromArray = deduplicateUsersList(data.users.map(normalizeAshUser).filter(Boolean));
+        if (fromArray.length > 0) return fromArray;
+      }
+
+      // 2. Fallback to top-level user map entries if 'users' array is absent
       const users = [];
       const reservedKeys = ['updatedAt', 'updatedBy', 'users', 'createdAt'];
-      
       for (const [key, val] of Object.entries(data)) {
         if (!reservedKeys.includes(key) && val && typeof val === 'object' && (val.username || val.role || val.name || val.password)) {
           const u = normalizeAshUser(val);
           if (u && u.username) users.push(u);
         }
       }
-
-      if (users.length === 0 && Array.isArray(data.users)) {
-        return data.users.map(normalizeAshUser).filter(Boolean);
-      }
-
-      return users;
+      return deduplicateUsersList(users);
     }
 
     function extractUsersFromRestFields(fields) {
       if (!fields) return [];
+      // 1. Authoritative canonical 'users' array first
+      if (fields.users && fields.users.arrayValue && Array.isArray(fields.users.arrayValue.values) && fields.users.arrayValue.values.length > 0) {
+        const fromArray = deduplicateUsersList(fields.users.arrayValue.values.map(parseRestUserItem).filter(Boolean));
+        if (fromArray.length > 0) return fromArray;
+      }
+
+      // 2. Fallback to top-level user map entries
       const users = [];
       const reservedKeys = ['updatedAt', 'updatedBy', 'users', 'createdAt'];
-
       for (const [key, val] of Object.entries(fields)) {
         if (!reservedKeys.includes(key) && val && val.mapValue && val.mapValue.fields) {
           const u = parseRestUserItem(val);
           if (u && u.username) users.push(u);
         }
       }
+      return deduplicateUsersList(users);
+    }
 
-      if (users.length === 0 && fields.users && fields.users.arrayValue && fields.users.arrayValue.values) {
-        return fields.users.arrayValue.values.map(parseRestUserItem).filter(Boolean);
+    function updateUsersFirebaseSyncBadge(status, customText) {
+      const badge = document.getElementById('users-firebase-sync-badge');
+      const dot = document.getElementById('users-firebase-sync-dot');
+      const text = document.getElementById('users-firebase-sync-text');
+      if (!badge || !dot || !text) return;
+
+      if (status === 'syncing') {
+        badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800 shadow-2xs';
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping';
+        text.innerText = customText || 'Syncing with Firebase...';
+      } else if (status === 'error') {
+        badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200/80 dark:border-rose-800 shadow-2xs';
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-rose-500';
+        text.innerText = customText || 'Firebase Sync Error';
+      } else {
+        badge.className = 'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800 shadow-2xs';
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse';
+        text.innerText = customText || 'Synced • Firebase ash-user';
       }
-
-      return users;
     }
 
     async function getFirebaseUsers(forceRefresh = false) {
@@ -2804,8 +3044,7 @@
         const docTargets = [
           { col: 'ash_settings', doc: 'ash-user' },
           { col: 'ash_settings', doc: 'users' },
-          { col: 'ash_dashboard', doc: 'ash-user' },
-          { col: 'ash-user', doc: 'users' }
+          { col: 'ash_dashboard', doc: 'ash-user' }
         ];
 
         for (const t of docTargets) {
@@ -2815,6 +3054,7 @@
               const list = extractUsersFromDocData(snap.data());
               if (list.length > 0) {
                 userManagementCache = list;
+                updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
                 return userManagementCache;
               }
             }
@@ -2839,6 +3079,7 @@
               const list = extractUsersFromRestFields(data.fields);
               if (list.length > 0) {
                 userManagementCache = list;
+                updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
                 return userManagementCache;
               }
             }
@@ -2852,6 +3093,22 @@
       return userManagementCache;
     }
 
+    function syncCurrentSessionWithUsersList(usersList) {
+      if (!currentUser || !currentUser.username || !Array.isArray(usersList)) return;
+      const updatedCurrent = usersList.find(u => u.username.toLowerCase() === currentUser.username.toLowerCase());
+      if (updatedCurrent) {
+        currentUser.allowedDashboards = updatedCurrent.allowedDashboards;
+        currentUser.fullName = updatedCurrent.fullName;
+        currentUser.role = updatedCurrent.role;
+        sessionStorage.setItem('ash_auth_user', JSON.stringify(currentUser));
+        if (localStorage.getItem('ash_auth_user')) {
+          localStorage.setItem('ash_auth_user', JSON.stringify(currentUser));
+        }
+        renderUserProfileInSidebar(currentUser);
+        applyUserDashboardPermissions(currentUser);
+      }
+    }
+
     function initUsersRealtimeListener() {
       if (!isFirebaseReady || !firestoreDb || usersRealtimeUnsubscribe) return;
       try {
@@ -2861,20 +3118,8 @@
               const list = extractUsersFromDocData(docSnap.data());
               if (list.length > 0) {
                 userManagementCache = list;
-                if (currentUser && currentUser.username) {
-                  const updatedCurrent = userManagementCache.find(u => u.username.toLowerCase() === currentUser.username.toLowerCase());
-                  if (updatedCurrent) {
-                    currentUser.allowedDashboards = updatedCurrent.allowedDashboards;
-                    currentUser.fullName = updatedCurrent.fullName;
-                    currentUser.role = updatedCurrent.role;
-                    sessionStorage.setItem('ash_auth_user', JSON.stringify(currentUser));
-                    if (localStorage.getItem('ash_auth_user')) {
-                      localStorage.setItem('ash_auth_user', JSON.stringify(currentUser));
-                    }
-                    renderUserProfileInSidebar(currentUser);
-                    applyUserDashboardPermissions(currentUser);
-                  }
-                }
+                updateUsersFirebaseSyncBadge('synced', 'Live Synced • Firebase');
+                syncCurrentSessionWithUsersList(userManagementCache);
                 if (currentView === 'settings') {
                   renderUserSettingsTable();
                 }
@@ -2888,8 +3133,33 @@
       }
     }
 
+    async function persistUsersPayloadToFirebase(updatedList, payload) {
+      let persisted = false;
+      if (isFirebaseReady && firestoreDb) {
+        const sdkTargets = [
+          { col: 'ash_settings', doc: 'ash-user' },
+          { col: 'ash_settings', doc: 'users' },
+          { col: 'ash_dashboard', doc: 'ash-user' }
+        ];
+        for (const t of sdkTargets) {
+          try {
+            // Full document replacement (no merge: true) so deleted user keys are removed cleanly
+            await firestoreDb.collection(t.col).doc(t.doc).set(payload);
+            persisted = true;
+          } catch (e) {
+            console.warn(`SDK write to ${t.col}/${t.doc} warning:`, e);
+          }
+        }
+      }
+
+      // Always execute REST API PATCH as well to guarantee immediate cloud persistence
+      const restOk = await saveAshUsersViaRestApi(updatedList, payload);
+      return persisted || restOk;
+    }
+
     async function saveFirebaseUser(userData, isEdit) {
       initFirebaseModule();
+      updateUsersFirebaseSyncBadge('syncing', 'Saving to Firebase...');
       const currentUsers = await getFirebaseUsers(true);
       const targetUsername = userData.username.trim().toLowerCase();
       const origUser = (userData.originalUsername || targetUsername).toLowerCase();
@@ -2898,23 +3168,33 @@
       const hasSettings = userData.allowedDashboards.includes('settings') || 
                           (userData.role || '').toLowerCase().includes('founder') || 
                           (userData.role || '').toLowerCase().includes('admin');
+      const finalDashboards = hasSettings && !userData.allowedDashboards.includes('settings')
+        ? [...userData.allowedDashboards, 'settings']
+        : [...userData.allowedDashboards];
 
       if (isEdit) {
+        if (targetUsername !== origUser) {
+          const conflict = currentUsers.some(u => u.username.toLowerCase() === targetUsername);
+          if (conflict) {
+            updateUsersFirebaseSyncBadge('error', 'Username conflict');
+            throw new Error('Username "' + targetUsername + '" is already taken by another user.');
+          }
+        }
         let found = false;
         updatedList = currentUsers.map(u => {
           if (u.username.toLowerCase() === origUser) {
             found = true;
             return {
-              id: u.id || ('user_' + targetUsername),
+              id: 'user_' + targetUsername,
               fullName: userData.fullName.trim(),
               name: userData.fullName.trim(),
               username: targetUsername,
               password: userData.password ? userData.password.trim() : u.password,
               role: userData.role.trim(),
               status: 'active',
-              allowedDashboards: userData.allowedDashboards,
+              allowedDashboards: finalDashboards,
               permissions: {
-                dashboards: userData.allowedDashboards,
+                dashboards: finalDashboards,
                 settings: hasSettings
               },
               createdAt: u.createdAt || new Date().toISOString(),
@@ -2924,11 +3204,13 @@
           return u;
         });
         if (!found) {
+          updateUsersFirebaseSyncBadge('error', 'User not found');
           throw new Error('User not found to update.');
         }
       } else {
         const exists = currentUsers.some(u => u.username.toLowerCase() === targetUsername);
         if (exists) {
+          updateUsersFirebaseSyncBadge('error', 'Username taken');
           throw new Error('Username "' + targetUsername + '" is already taken. Please choose another username.');
         }
         const newUser = {
@@ -2939,9 +3221,9 @@
           password: userData.password.trim(),
           role: userData.role.trim(),
           status: 'active',
-          allowedDashboards: userData.allowedDashboards,
+          allowedDashboards: finalDashboards,
           permissions: {
-            dashboards: userData.allowedDashboards,
+            dashboards: finalDashboards,
             settings: hasSettings
           },
           createdAt: new Date().toISOString(),
@@ -2950,7 +3232,7 @@
         updatedList = [...currentUsers, newUser];
       }
 
-      // Build payload containing each user individually as a named field + array
+      // Build payload containing canonical 'users' array + individual user keys
       const payload = {
         users: updatedList,
         updatedAt: new Date().toISOString(),
@@ -2971,30 +3253,14 @@
             dashboards: u.allowedDashboards,
             settings: u.allowedDashboards.includes('settings') || (u.role || '').toLowerCase().includes('founder') || (u.role || '').toLowerCase().includes('admin')
           },
+          createdAt: u.createdAt || new Date().toISOString(),
           updatedAt: u.updatedAt || new Date().toISOString()
         };
       }
 
-      if (isFirebaseReady && firestoreDb) {
-        try {
-          await firestoreDb.collection('ash_settings').doc('ash-user').set(payload, { merge: true });
-        } catch (e) {
-          console.warn('Write to ash_settings/ash-user failed:', e);
-        }
-        try {
-          await firestoreDb.collection('ash_settings').doc('users').set(payload, { merge: true });
-        } catch (e) {}
-        try {
-          await firestoreDb.collection('ash_dashboard').doc('ash-user').set(payload, { merge: true });
-        } catch (e) {}
-        try {
-          await firestoreDb.collection('ash-user').doc('users').set(payload, { merge: true });
-        } catch (e) {}
-      } else {
-        await saveAshUsersViaRestApi(updatedList, payload);
-      }
-
+      await persistUsersPayloadToFirebase(updatedList, payload);
       userManagementCache = updatedList;
+      updateUsersFirebaseSyncBadge('synced', 'Saved to Firebase');
 
       if (currentUser && (currentUser.username.toLowerCase() === targetUsername || (isEdit && currentUser.username.toLowerCase() === origUser))) {
         const selfUpdated = updatedList.find(u => u.username.toLowerCase() === targetUsername);
@@ -3017,16 +3283,19 @@
 
     async function deleteFirebaseUser(username) {
       initFirebaseModule();
+      updateUsersFirebaseSyncBadge('syncing', 'Deleting from Firebase...');
       const currentUsers = await getFirebaseUsers(true);
       const target = username.trim().toLowerCase();
 
       if (currentUser && currentUser.username.toLowerCase() === target) {
+        updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
         throw new Error('You cannot delete your own logged-in account.');
       }
 
       const admins = currentUsers.filter(u => (u.role || '').toLowerCase() === 'founder' || (u.role || '').toLowerCase() === 'administrator' || (u.role || '').toLowerCase() === 'superadmin');
       const targetUser = currentUsers.find(u => u.username.toLowerCase() === target);
       if (targetUser && ((targetUser.role || '').toLowerCase() === 'founder' || (targetUser.role || '').toLowerCase() === 'administrator' || (targetUser.role || '').toLowerCase() === 'superadmin') && admins.length <= 1) {
+        updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
         throw new Error('Cannot delete the last administrator account.');
       }
 
@@ -3052,84 +3321,60 @@
             dashboards: u.allowedDashboards,
             settings: u.allowedDashboards.includes('settings') || (u.role || '').toLowerCase().includes('founder') || (u.role || '').toLowerCase().includes('admin')
           },
+          createdAt: u.createdAt || new Date().toISOString(),
           updatedAt: u.updatedAt || new Date().toISOString()
         };
       }
 
-      if (isFirebaseReady && firestoreDb) {
-        try {
-          await firestoreDb.collection('ash_settings').doc('ash-user').set(payload, { merge: true });
-        } catch (e) {}
-        try {
-          await firestoreDb.collection('ash_settings').doc('users').set(payload, { merge: true });
-        } catch (e) {}
-        try {
-          await firestoreDb.collection('ash_dashboard').doc('ash-user').set(payload, { merge: true });
-        } catch (e) {}
-        try {
-          await firestoreDb.collection('ash-user').doc('users').set(payload, { merge: true });
-        } catch (e) {}
-      } else {
-        await saveAshUsersViaRestApi(updatedList, payload);
-      }
-
+      await persistUsersPayloadToFirebase(updatedList, payload);
       userManagementCache = updatedList;
+      updateUsersFirebaseSyncBadge('synced', 'Deleted from Firebase');
       return updatedList;
     }
 
     async function saveAshUsersViaRestApi(usersList, fullPayload = null) {
-      function toRestValue(val) {
-        if (typeof val === 'string') return { stringValue: val };
-        if (typeof val === 'boolean') return { booleanValue: val };
-        if (typeof val === 'number') return { integerValue: String(val) };
-        if (Array.isArray(val)) {
-          return { arrayValue: { values: val.map(toRestValue) } };
-        }
-        if (typeof val === 'object' && val !== null) {
-          const fields = {};
-          for (const [k, v] of Object.entries(val)) {
-            fields[k] = toRestValue(v);
-          }
-          return { mapValue: { fields } };
-        }
-        return { nullValue: null };
-      }
-
       const fieldsObj = fullPayload || { users: usersList, updatedAt: new Date().toISOString() };
       const fields = {};
       for (const [k, v] of Object.entries(fieldsObj)) {
-        fields[k] = toRestValue(v);
+        fields[k] = toFirestoreRestValue(v);
       }
 
-      const restTargets = ['ash_settings/ash-user', 'ash_settings/users'];
+      const restTargets = ['ash_settings/ash-user', 'ash_settings/users', 'ash_dashboard/ash-user'];
+      let anySuccess = false;
       for (const p of restTargets) {
         try {
           const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/' + p + '?key=' + firebaseConfig.apiKey;
-          await fetch(restUrl, {
+          const res = await fetch(restUrl, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ fields })
           });
+          if (res.ok) anySuccess = true;
         } catch (e) {}
       }
+      return anySuccess;
     }
 
     /* ==========================================================================
        SETTINGS & USER MANAGEMENT UI CONTROLLERS
        ========================================================================== */
     async function loadAndRenderUserSettingsView() {
-      await loadUsersFromFirebase(false);
       renderUserSettingsTable();
+      await loadUsersFromFirebase(true);
     }
 
     async function loadUsersFromFirebase(force = false) {
       const refreshIcon = document.getElementById('users-refresh-icon');
       if (refreshIcon) refreshIcon.classList.add('animate-spin');
+      if (force) updateUsersFirebaseSyncBadge('syncing', 'Refreshing from Firebase...');
       try {
-        await getFirebaseUsers(force);
+        const list = await getFirebaseUsers(force);
+        syncCurrentSessionWithUsersList(list);
         renderUserSettingsTable();
+        updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
       } catch (err) {
         console.error('Failed to load users from Firebase:', err);
+        updateUsersFirebaseSyncBadge('error', 'Sync Failed');
       } finally {
         if (refreshIcon) {
           setTimeout(() => refreshIcon.classList.remove('animate-spin'), 600);
@@ -3386,11 +3631,11 @@
       if (nameField) nameField.value = user.fullName || '';
       if (userField) {
         userField.value = user.username;
-        userField.readOnly = true;
+        userField.readOnly = false;
       }
       if (passField) {
         passField.type = 'password';
-        passField.value = '';
+        passField.value = user.password || '';
         passField.required = false;
         passField.placeholder = '•••••••• (unchanged)';
       }
@@ -4227,13 +4472,19 @@
 
       // 5. Employee Status Management & Employee Directory sections
       const empStatusSection = document.getElementById('sidebar-emp-status-section');
-      if (empStatusSection) {
-        empStatusSection.style.display = allowed.includes('employee_directory') ? '' : 'none';
-      }
-
+      const empStatusBtn = document.getElementById('sidebar-emp-status-btn');
       const empSection = document.getElementById('sidebar-emp-section');
+      const hasEmpStatusAccess = allowed.includes('emp-status');
+      const hasEmpDirectoryAccess = allowed.includes('employee_directory');
+
+      if (empStatusSection) {
+        empStatusSection.style.display = (hasEmpStatusAccess || hasEmpDirectoryAccess) ? '' : 'none';
+      }
+      if (empStatusBtn) {
+        empStatusBtn.style.display = hasEmpStatusAccess ? '' : 'none';
+      }
       if (empSection) {
-        empSection.style.display = allowed.includes('employee_directory') ? '' : 'none';
+        empSection.style.display = hasEmpDirectoryAccess ? '' : 'none';
       }
 
       // 5. Daily Report
@@ -4569,7 +4820,7 @@
       if (currentUser && currentUser.allowedDashboards && currentUser.allowedDashboards.length > 0) {
         if (!currentUser.allowedDashboards.includes(viewName)) {
           console.warn(`Access denied to "${viewName}". Switching to authorized dashboard.`);
-          const fallback = currentUser.allowedDashboards.find(v => v !== 'employee_directory' && v !== 'emp-status') || currentUser.allowedDashboards[0];
+          const fallback = currentUser.allowedDashboards.find(v => v !== 'employee_directory') || currentUser.allowedDashboards[0];
           viewName = fallback;
         }
       }
@@ -4703,6 +4954,7 @@
           loadEmployeeStatusCache();
           hasUnsavedEmpStatusChanges = false;
           renderEmpStatusDashboardView();
+          loadEmployeeStatusFromFirebase();
         }
       } else if (viewName === 'settings' || viewName === 'user-management') {
         if (btnSettings) btnSettings.className = "sidebar-nav-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl font-bold text-xs bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 shadow-2xs transition-all cursor-pointer";
@@ -4948,7 +5200,14 @@
     async function triggerManualSync() {
       updateAllSyncUI('syncing');
       try {
-        const success = await fetchLiveData(true);
+        const [success] = await Promise.all([
+          fetchLiveData(true),
+          loadEmployeeStatusFromFirebase().catch(() => null),
+          getFirebaseUsers(true).catch(() => null)
+        ]);
+        if (currentView === 'settings') {
+          renderUserManagementTable();
+        }
         if (success) {
           updateAllSyncUI('success');
         } else {
@@ -5007,6 +5266,21 @@
 
       } catch (err) {
         console.error('Live API fetch error:', err);
+        // Fallback: attempt to pull latest cached dashboard data from Firebase Cloud Firestore
+        try {
+          const fbCached = await loadLiveDashboardDataFromFirebase();
+          if (fbCached && fbCached.sheets) {
+            processAndRenderPayload(fbCached);
+            if (syncText && syncStatus) {
+              syncText.innerText = `Firebase Synced (${allProcessedRows.length})`;
+              syncStatus.className = 'w-full flex items-center justify-between p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-[11px] font-medium text-indigo-700 dark:text-indigo-300';
+            }
+            updateAllSyncUI('success');
+            return true;
+          }
+        } catch (fbErr) {
+          console.warn('Firebase fallback during live sync failed:', fbErr);
+        }
         updateAllSyncUI('error');
         if (!allProcessedRows.length && syncText && syncStatus) {
           syncText.innerText = 'Sync Error';
@@ -5030,19 +5304,19 @@
     let eodEndDate = '';
 
     const fallbackEODData = [
-      { name: 'Hashir', department: 'Academic', designation: 'Academic coordinator', reportDate: '2026-08-28', todayTask: 'Course curriculum review & student counseling', taskCompleted: 'Course curriculum review finished', taskPending: 'Student counseling follow-ups', whyPending: 'Awaiting parent availability' },
-      { name: 'Gopika', department: 'HR', designation: 'HR Manager', reportDate: '2026-08-28', todayTask: 'Staff onboarding & interview rounds', taskCompleted: '2 Senior developer interviews conducted', taskPending: 'Offer letter drafting', whyPending: 'Salary negotiation in progress' },
-      { name: 'Rafsida', department: 'Placement', designation: 'HRE Placement officer', reportDate: '2026-08-28', todayTask: 'Company tie-ups & student resume review', taskCompleted: 'Resumes reviewed for MERN batch', taskPending: 'Schedule interview drives', whyPending: 'Awaiting HR confirmation from TechCorp' },
+      { name: 'Hashir', department: 'Academy', designation: 'Academy Coordinator', reportDate: '2026-08-28', todayTask: 'Course curriculum review & student counseling', taskCompleted: 'Course curriculum review finished', taskPending: 'Student counseling follow-ups', whyPending: 'Awaiting parent availability' },
+      { name: 'Gopika', department: 'HR', designation: 'HR Executive', reportDate: '2026-08-28', todayTask: 'Staff onboarding & interview rounds', taskCompleted: '2 Senior developer interviews conducted', taskPending: 'Offer letter drafting', whyPending: 'Salary negotiation in progress' },
+      { name: 'Rafsida', department: 'Academy', designation: 'Placement Officer', reportDate: '2026-08-28', todayTask: 'Company tie-ups & student resume review', taskCompleted: 'Resumes reviewed for MERN batch', taskPending: 'Schedule interview drives', whyPending: 'Awaiting HR confirmation from TechCorp' },
       { name: 'Hissath', department: 'Accounts', designation: 'Accountant', reportDate: '2026-08-27', todayTask: 'Fee collection audit & invoice generation', taskCompleted: 'August fee audit completed', taskPending: 'GST return filing draft', whyPending: 'Pending bank statements' },
-      { name: 'shahana sheri', department: 'SHO', designation: 'SHO Officer', reportDate: '2026-08-27', todayTask: 'Branch inspection & student feedback review', taskCompleted: 'Branch inspection completed', taskPending: 'Feedback summary report', whyPending: 'Under compilation' },
-      { name: 'Haseena', department: 'Supervision', designation: 'Supervisor', reportDate: '2026-08-27', todayTask: 'Mentor session audit & daily log review', taskCompleted: 'Daily log review finished', taskPending: 'Mentor performance scoring', whyPending: 'Sessions scheduled for tomorrow' },
-      { name: 'Nihala', department: 'Digital Marketing', designation: 'Digital marketing head', reportDate: '2026-08-26', todayTask: 'Meta Ads campaign setup & SEO audit', taskCompleted: 'Meta Ads campaign live', taskPending: 'SEO audit report', whyPending: 'Keyword data export pending' },
-      { name: 'vishnu Priya', department: 'Content Creation', designation: 'Content creator cum presenter', reportDate: '2026-08-26', todayTask: 'Reels shooting & YouTube scriptwriting', taskCompleted: '2 Reels filmed', taskPending: 'YouTube video script', whyPending: 'Review by DM head pending' },
-      { name: 'Jamsheed', department: 'Design', designation: 'Graphic design mentor', reportDate: '2026-08-26', todayTask: 'Design batch mentoring & banner review', taskCompleted: 'Photoshop module class conducted', taskPending: 'Student portfolio grading', whyPending: 'Submissions extended to 6 PM' },
-      { name: 'Safal', department: 'Digital Marketing', designation: 'Digital marketing mentor', reportDate: '2026-08-25', todayTask: 'Google Ads workshop & practical evaluation', taskCompleted: 'Google Ads live workshop held', taskPending: 'Practical campaign grading', whyPending: 'Ongoing' },
-      { name: 'Sunisha', department: 'Development', designation: 'Mernstack mentor cum developer', reportDate: '2026-08-25', todayTask: 'Dashboard bug fixes & Node API refactor', taskCompleted: 'Dashboard bug fixes completed', taskPending: 'Node API endpoint optimization', whyPending: 'Testing in progress' },
-      { name: 'Arjun', department: 'Development', designation: 'Developer', reportDate: '2026-08-25', todayTask: 'React component optimization & UI styling', taskCompleted: 'UI styling updated', taskPending: 'Integration testing', whyPending: 'Awaiting backend response' },
-      { name: 'Husnu Mubarak', department: 'Development', designation: 'Web developer', reportDate: '2026-08-25', todayTask: 'Landing page deployment & responsiveness check', taskCompleted: 'Responsive layout verified', taskPending: 'Domain DNS mapping', whyPending: 'Access permission required' }
+      { name: 'Shahana', department: 'Academy', designation: 'SHO', reportDate: '2026-08-27', todayTask: 'Branch inspection & student feedback review', taskCompleted: 'Branch inspection completed', taskPending: 'Feedback summary report', whyPending: 'Under compilation' },
+      { name: 'Haseena', department: 'Academy', designation: 'Administration', reportDate: '2026-08-27', todayTask: 'Mentor session audit & daily log review', taskCompleted: 'Daily log review finished', taskPending: 'Mentor performance scoring', whyPending: 'Sessions scheduled for tomorrow' },
+      { name: 'Nihala', department: 'Marketing', designation: 'Marketing Head', reportDate: '2026-08-26', todayTask: 'Meta Ads campaign setup & SEO audit', taskCompleted: 'Meta Ads campaign live', taskPending: 'SEO audit report', whyPending: 'Keyword data export pending' },
+      { name: 'Vishnupriya', department: 'Marketing', designation: 'Content Creator', reportDate: '2026-08-26', todayTask: 'Reels shooting & YouTube scriptwriting', taskCompleted: '2 Reels filmed', taskPending: 'YouTube video script', whyPending: 'Review by DM head pending' },
+      { name: 'Jamsheed', department: 'Design', designation: 'Graphic Designer', reportDate: '2026-08-26', todayTask: 'Design batch mentoring & banner review', taskCompleted: 'Photoshop module class conducted', taskPending: 'Student portfolio grading', whyPending: 'Submissions extended to 6 PM' },
+      { name: 'Safal', department: 'Academy', designation: 'Digital Marketing Mentor', reportDate: '2026-08-25', todayTask: 'Google Ads workshop & practical evaluation', taskCompleted: 'Google Ads live workshop held', taskPending: 'Practical campaign grading', whyPending: 'Ongoing' },
+      { name: 'Sunisha', department: 'Academy', designation: 'MERN Stack Mentor', reportDate: '2026-08-25', todayTask: 'Dashboard bug fixes & Node API refactor', taskCompleted: 'Dashboard bug fixes completed', taskPending: 'Node API endpoint optimization', whyPending: 'Testing in progress' },
+      { name: 'Arjun', department: 'Tech', designation: 'MERN Stack Developer', reportDate: '2026-08-25', todayTask: 'React component optimization & UI styling', taskCompleted: 'UI styling updated', taskPending: 'Integration testing', whyPending: 'Awaiting backend response' },
+      { name: 'Husnu Mubarak', department: 'Tech', designation: 'Web Developer cum Mentor', reportDate: '2026-08-25', todayTask: 'Landing page deployment & responsiveness check', taskCompleted: 'Responsive layout verified', taskPending: 'Domain DNS mapping', whyPending: 'Access permission required' }
     ];
 
     function parseEODDateToISO(dateVal, fallbackTimestamp = '') {
@@ -5100,6 +5374,133 @@
       return '';
     }
 
+    // ==========================================
+    // STANDARDIZATION & CANONICALIZATION FORMULAS
+    // ==========================================
+
+    // Title Case formula: capitalizes each word cleanly, trims excessive spaces
+    function toTitleCase(str) {
+      if (!str) return '';
+      return String(str)
+        .trim()
+        .replace(/\s+/g, ' ')
+        .split(' ')
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(' ');
+    }
+
+    // Comprehensive Name Canonicalization Formula
+    function canonicalizeStaffName(name) {
+      if (!name || name === 'N/A' || name === 'undefined' || name === 'null') return '';
+      const s = String(name).trim();
+      if (!s) return '';
+      const lower = s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      // Known staff variations & aliases
+      if (lower.includes('nihala')) return 'Nihala';
+      if (lower.includes('shahana')) return 'Shahana';
+      if (lower.includes('husnu') || lower.includes('mubarak')) return 'Husnu Mubarak';
+      if (lower.includes('vishnu') || lower.includes('priya')) return 'Vishnupriya';
+      if (lower.includes('shafal') || lower === 'safal') return 'Safal';
+      if (lower.includes('hissath') || lower.includes('hizzath')) return 'Hissath';
+      if (lower === 'hashir' || lower === 'hshir') return 'Hashir';
+      if (lower.includes('haseena')) return 'Haseena';
+      if (lower.includes('hemin')) return 'Hemin';
+      if (lower.includes('sunisha')) return 'Sunisha';
+      if (lower === 'arjun') return 'Arjun';
+      if (lower.includes('rafsida')) return 'Rafsida';
+      if (lower.includes('gopika')) return 'Gopika';
+      if (lower.includes('gokul')) return 'Gokul';
+      if (lower.includes('jamsheed')) return 'Jamsheed';
+      if (lower === 'sufail') return 'Sufail';
+
+      // Fallback: Perfect Title Case (preserves full proper names like "Sagar Babu")
+      return toTitleCase(s);
+    }
+
+    // Comprehensive Department Canonicalization Formula
+    function canonicalizeDepartment(rawDept, rawName) {
+      const canonName = canonicalizeStaffName(rawName);
+      const staffMeta = KNOWN_STAFF_REGISTRY.find(k => k.name === canonName);
+
+      const d = String(rawDept || '').trim();
+      const lower = d.toLowerCase();
+
+      // If known staff member has a registered department and raw is missing or is their known sub-role/department
+      if (staffMeta && (!d || d === 'N/A' || d === 'Staff' || lower.includes('placement') || lower.includes('sho') || lower.includes('supervis') || (canonName === 'Safal' && lower.includes('marketing')) || (canonName === 'Sunisha' && lower.includes('dev')))) {
+        return staffMeta.department;
+      }
+
+      if (!d || d === 'N/A' || d === 'Staff') {
+        if (staffMeta) return staffMeta.department;
+        return 'General';
+      }
+
+      // Department rules matching
+      if (/\b(marketing|digital|content|seo|social|media|reels)\b/i.test(lower)) {
+        return 'Marketing';
+      }
+      if (/\b(tech|technology|dev|development|mern|react|software|frontend|backend|it)\b/i.test(lower)) {
+        return 'Tech';
+      }
+      if (/\b(academy|academic|academics|placement|sho|supervis|mentorship|mentor|student)\b/i.test(lower)) {
+        return 'Academy';
+      }
+      if (/\b(design|graphic|photoshop|ui|ux|creative)\b/i.test(lower)) {
+        return 'Design';
+      }
+      if (/\b(hr|human|resources|recruit|recruitment|talent)\b/i.test(lower)) {
+        return 'HR';
+      }
+      if (/\b(accounts|account|accounting|finance|audit|gst|tax|billing)\b/i.test(lower)) {
+        return 'Accounts';
+      }
+      if (/\b(management|admin|administration|operations|founder|director)\b/i.test(lower)) {
+        return 'Management';
+      }
+
+      if (staffMeta) return staffMeta.department;
+      return toTitleCase(d);
+    }
+
+    // Comprehensive Designation / Role Canonicalization Formula
+    function canonicalizeDesignation(rawDesig, rawName) {
+      const canonName = canonicalizeStaffName(rawName);
+      const staffMeta = KNOWN_STAFF_REGISTRY.find(k => k.name === canonName);
+
+      const s = String(rawDesig || '').trim();
+      const lower = s.toLowerCase();
+
+      if (!s || s === 'N/A' || s === 'Staff') {
+        if (staffMeta) return staffMeta.designation;
+        return 'Team Member';
+      }
+
+      // Canonical mappings for all standard designations
+      if (/academic\s*coord/i.test(lower)) return 'Academy Coordinator';
+      if (/hr\s*(manager|exec)/i.test(lower) || lower === 'hr') return 'HR Executive';
+      if (/placement/i.test(lower)) return 'Placement Officer';
+      if (/sho/i.test(lower)) return 'SHO';
+      if (/supervisor|supervision/i.test(lower)) return 'Administration';
+      if (/(digital\s*)?marketing\s*head/i.test(lower)) return 'Marketing Head';
+      if (/content\s*creator/i.test(lower)) return 'Content Creator';
+      if (/graphic\s*design/i.test(lower)) return 'Graphic Designer';
+      if (/digital\s*marketing\s*mentor/i.test(lower)) return 'Digital Marketing Mentor';
+      if (/mern\s*stack\s*mentor|mernstack\s*mentor/i.test(lower)) return 'MERN Stack Mentor';
+      if (/web\s*developer/i.test(lower)) return 'Web Developer cum Mentor';
+      if (/\bdeveloper\b/i.test(lower) || /mern\s*stack\s*dev/i.test(lower)) return 'MERN Stack Developer';
+      if (/accountant|accounting/i.test(lower)) return 'Accountant';
+      if (/video\s*editor/i.test(lower)) return 'Video Editor';
+      if (/founder|ceo|managing\s*director/i.test(lower)) return 'Founder';
+      if (/administrator|admin/i.test(lower)) return 'Administrator';
+
+      if (staffMeta && (lower.length <= 4 || staffMeta.designation.toLowerCase().includes(lower))) {
+        return staffMeta.designation;
+      }
+
+      return toTitleCase(s);
+    }
+
     function parseAndNormalizeEODData(rawData) {
       const eodRowsAcc = [];
       const sheets = rawData.sheets || {};
@@ -5135,12 +5536,15 @@
         if (!rawName && !rawPlanned) return;
 
         const parsedDateStr = parseEODDateToISO(rawDate, rawTimestamp) || parseEODDateToISO(rawTimestamp, '');
+        const canonName = canonicalizeStaffName(rawName);
+        const canonDept = canonicalizeDepartment(rawDept, canonName);
+        const canonDesig = canonicalizeDesignation(rawDesig, canonName);
 
         eodRowsAcc.push({
           timestamp: rawTimestamp,
-          name: rawName || 'N/A',
-          department: rawDept || 'N/A',
-          designation: rawDesig || 'N/A',
+          name: canonName || 'N/A',
+          department: canonDept || 'N/A',
+          designation: canonDesig || 'N/A',
           reportDate: parsedDateStr || getSystemTodayISO(),
           todayTask: rawPlanned || 'N/A',
           taskCompleted: rawCompleted || 'N/A',
@@ -5161,6 +5565,7 @@
     // ==========================================
     const KNOWN_STAFF_REGISTRY = [
       { name: 'Arjun', department: 'Tech', designation: 'MERN Stack Developer' },
+      { name: 'Gokul', department: 'Academy', designation: 'Graphic Designer' },
       { name: 'Gopika', department: 'HR', designation: 'HR Executive' },
       { name: 'Haseena', department: 'Academy', designation: 'Administration' },
       { name: 'Hashir', department: 'Academy', designation: 'Academy Coordinator' },
@@ -5172,30 +5577,10 @@
       { name: 'Rafsida', department: 'Academy', designation: 'Placement Officer' },
       { name: 'Safal', department: 'Academy', designation: 'Digital Marketing Mentor' },
       { name: 'Shahana', department: 'Academy', designation: 'SHO' },
+      { name: 'Sufail', department: 'Management', designation: 'Founder' },
       { name: 'Sunisha', department: 'Academy', designation: 'MERN Stack Mentor' },
       { name: 'Vishnupriya', department: 'Marketing', designation: 'Content Creator' }
     ];
-
-    function canonicalizeStaffName(name) {
-      if (!name || name === 'N/A') return '';
-      const s = String(name).trim();
-      const lower = s.toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (lower.includes('nihala')) return 'Nihala';
-      if (lower.includes('shahana')) return 'Shahana';
-      if (lower.includes('husnu')) return 'Husnu Mubarak';
-      if (lower.includes('vishnu')) return 'Vishnupriya';
-      if (lower.includes('shafal') || lower.includes('safal')) return 'Safal';
-      if (lower.includes('hissath') || lower.includes('hizzath')) return 'Hissath';
-      if (lower.includes('hashir')) return 'Hashir';
-      if (lower.includes('haseena')) return 'Haseena';
-      if (lower.includes('hemin')) return 'Hemin';
-      if (lower.includes('sunisha')) return 'Sunisha';
-      if (lower.includes('arjun')) return 'Arjun';
-      if (lower.includes('rafsida')) return 'Rafsida';
-      if (lower.includes('gopika')) return 'Gopika';
-      if (lower.includes('jamsheed')) return 'Jamsheed';
-      return s.charAt(0).toUpperCase() + s.slice(1);
-    }
 
     const EMP_STATUS_CACHE_KEY = 'ash_employee_status_cache';
     const EMP_FILTER_MODE_KEY = 'ash_employee_status_filter_mode';
@@ -5217,6 +5602,10 @@
         employeeStatusCache = {};
       }
 
+      if (typeof normalizeEmployeeStatusMap === 'function') {
+        employeeStatusCache = normalizeEmployeeStatusMap(employeeStatusCache);
+      }
+
       KNOWN_STAFF_REGISTRY.forEach(item => {
         if (!employeeStatusCache[item.name]) {
           employeeStatusCache[item.name] = {
@@ -5224,6 +5613,10 @@
             department: item.department,
             designation: item.designation
           };
+        } else {
+          // Standardize existing cached entries to ensure correct canonical values
+          employeeStatusCache[item.name].department = item.department;
+          employeeStatusCache[item.name].designation = item.designation;
         }
       });
 
@@ -5259,13 +5652,26 @@
       if (Array.isArray(allWeeklyRows)) {
         allWeeklyRows.forEach(r => {
           const canon = canonicalizeStaffName(r.staffName);
-          if (canon && !employeeStatusCache[canon]) {
-            employeeStatusCache[canon] = {
-              active: true,
-              department: r.department || 'Staff',
-              designation: r.designation || 'Staff'
-            };
-            changed = true;
+          const dept = canonicalizeDepartment(r.department, canon);
+          const desig = canonicalizeDesignation(r.designation, canon);
+          if (canon) {
+            if (!employeeStatusCache[canon]) {
+              employeeStatusCache[canon] = {
+                active: true,
+                department: dept,
+                designation: desig
+              };
+              changed = true;
+            } else {
+              if (employeeStatusCache[canon].department === 'Staff' && dept !== 'Staff') {
+                employeeStatusCache[canon].department = dept;
+                changed = true;
+              }
+              if (employeeStatusCache[canon].designation === 'Staff' && desig !== 'Staff') {
+                employeeStatusCache[canon].designation = desig;
+                changed = true;
+              }
+            }
           }
         });
       }
@@ -5273,13 +5679,26 @@
       if (Array.isArray(allEODRows)) {
         allEODRows.forEach(r => {
           const canon = canonicalizeStaffName(r.name);
-          if (canon && !employeeStatusCache[canon]) {
-            employeeStatusCache[canon] = {
-              active: true,
-              department: r.department || 'Staff',
-              designation: r.designation || 'Staff'
-            };
-            changed = true;
+          const dept = canonicalizeDepartment(r.department, canon);
+          const desig = canonicalizeDesignation(r.designation, canon);
+          if (canon) {
+            if (!employeeStatusCache[canon]) {
+              employeeStatusCache[canon] = {
+                active: true,
+                department: dept,
+                designation: desig
+              };
+              changed = true;
+            } else {
+              if (employeeStatusCache[canon].department === 'Staff' && dept !== 'Staff') {
+                employeeStatusCache[canon].department = dept;
+                changed = true;
+              }
+              if (employeeStatusCache[canon].designation === 'Staff' && desig !== 'Staff') {
+                employeeStatusCache[canon].designation = desig;
+                changed = true;
+              }
+            }
           }
         });
       }
@@ -5351,7 +5770,12 @@
       if (!canon) return;
 
       if (!employeeStatusCache[canon]) {
-        employeeStatusCache[canon] = { active: isActive, department: 'Staff', designation: 'Staff' };
+        const staffMeta = KNOWN_STAFF_REGISTRY.find(k => k.name === canon);
+        employeeStatusCache[canon] = {
+          active: isActive,
+          department: staffMeta ? staffMeta.department : canonicalizeDepartment('', canon),
+          designation: staffMeta ? staffMeta.designation : canonicalizeDesignation('', canon)
+        };
       } else {
         employeeStatusCache[canon].active = isActive;
       }
@@ -5373,6 +5797,7 @@
       employeeFilterMode = mode === 'all' ? 'all' : 'active';
       saveEmployeeStatusCache();
       onEmployeeStatusUpdated();
+      saveEmployeeStatusToFirebase();
     }
 
     function onEmployeeStatusUpdated() {
@@ -5401,14 +5826,22 @@
 
     function renderEmpStatusDashboardView() {
       if (!employeeStatusCache) loadEmployeeStatusCache();
+      if (typeof normalizeEmployeeStatusMap === 'function') {
+        employeeStatusCache = normalizeEmployeeStatusMap(employeeStatusCache);
+      }
       syncEmployeesFromData();
 
-      const staffList = Object.keys(employeeStatusCache).sort().map(name => ({
-        name: name,
-        active: employeeStatusCache[name].active !== false,
-        department: employeeStatusCache[name].department || 'Staff',
-        designation: employeeStatusCache[name].designation || 'Staff'
-      }));
+      const staffList = Object.keys(employeeStatusCache).sort().map(name => {
+        const canonName = canonicalizeStaffName(name);
+        const canonDept = canonicalizeDepartment(employeeStatusCache[name].department, canonName);
+        const canonDesig = canonicalizeDesignation(employeeStatusCache[name].designation, canonName);
+        return {
+          name: canonName,
+          active: employeeStatusCache[name].active !== false,
+          department: canonDept,
+          designation: canonDesig
+        };
+      });
 
       const totalCount = staffList.length;
       const activeCount = staffList.filter(s => s.active).length;
@@ -5423,12 +5856,22 @@
 
       updateSaveStatusButtonState(!hasUnsavedEmpStatusChanges);
 
-      // Render Department Slicers (Ghost style with filled active state)
-      const deptCounts = { ALL: totalCount };
-      staffList.forEach(s => {
+      // Connected Department Slicers (counts & options based on selected status)
+      const statusScopedStaff = staffList.filter(s => {
+        if (dashSelectedStatus === 'ACTIVE') return s.active;
+        if (dashSelectedStatus === 'INACTIVE') return !s.active;
+        return true;
+      });
+
+      const deptCounts = { ALL: statusScopedStaff.length };
+      statusScopedStaff.forEach(s => {
         deptCounts[s.department] = (deptCounts[s.department] || 0) + 1;
       });
-      const depts = ['ALL', ...Object.keys(deptCounts).filter(d => d !== 'ALL').sort()];
+      const depts = ['ALL', ...Object.keys(deptCounts).filter(d => d !== 'ALL' && deptCounts[d] > 0).sort()];
+      if (dashSelectedDept !== 'ALL' && !depts.includes(dashSelectedDept)) {
+        dashSelectedDept = 'ALL';
+      }
+
       const deptContainer = document.getElementById('dash-emp-dept-slicers');
       if (deptContainer) {
         deptContainer.innerHTML = depts.map(d => {
@@ -5439,15 +5882,33 @@
         }).join('');
       }
 
-      // Update Status Slicer Buttons (Linear segmented control)
+      // Connected Status Slicer Buttons (counts based on selected department)
+      const deptScopedStaff = staffList.filter(s => {
+        if (dashSelectedDept === 'ALL') return true;
+        return s.department.toLowerCase() === dashSelectedDept.toLowerCase();
+      });
+      const pillAllCount = deptScopedStaff.length;
+      const pillActiveCount = deptScopedStaff.filter(s => s.active).length;
+      const pillInactiveCount = pillAllCount - pillActiveCount;
+
       const pillAll = document.getElementById('dash-status-pill-all');
       const pillActive = document.getElementById('dash-status-pill-active');
       const pillInactive = document.getElementById('dash-status-pill-inactive');
       const activePillClass = "px-3 py-1 rounded-lg transition-all cursor-pointer font-semibold bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs";
       const inactivePillClass = "px-3 py-1 rounded-lg transition-all cursor-pointer font-medium text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200";
-      if (pillAll) pillAll.className = dashSelectedStatus === 'ALL' ? activePillClass : inactivePillClass;
-      if (pillActive) pillActive.className = dashSelectedStatus === 'ACTIVE' ? activePillClass : inactivePillClass;
-      if (pillInactive) pillInactive.className = dashSelectedStatus === 'INACTIVE' ? activePillClass : inactivePillClass;
+
+      if (pillAll) {
+        pillAll.className = dashSelectedStatus === 'ALL' ? activePillClass : inactivePillClass;
+        pillAll.innerHTML = `All <span class="text-[10px] opacity-60 font-mono">(${pillAllCount})</span>`;
+      }
+      if (pillActive) {
+        pillActive.className = dashSelectedStatus === 'ACTIVE' ? activePillClass : inactivePillClass;
+        pillActive.innerHTML = `Active <span class="text-[10px] opacity-60 font-mono">(${pillActiveCount})</span>`;
+      }
+      if (pillInactive) {
+        pillInactive.className = dashSelectedStatus === 'INACTIVE' ? activePillClass : inactivePillClass;
+        pillInactive.innerHTML = `Inactive <span class="text-[10px] opacity-60 font-mono">(${pillInactiveCount})</span>`;
+      }
 
       // Filter Table Rows
       const searchInput = document.getElementById('dash-emp-search');
@@ -5486,10 +5947,13 @@
       // Department accent dots (one consistent badge style)
       const deptDots = {
         'Academy': 'bg-sky-500 dark:bg-sky-400',
-        'Accounts': 'bg-amber-500 dark:bg-amber-400',
+        'Tech': 'bg-emerald-500 dark:bg-emerald-400',
         'Marketing': 'bg-purple-500 dark:bg-purple-400',
-        'Admin': 'bg-slate-400 dark:bg-slate-500',
-        'Management': 'bg-indigo-500 dark:bg-indigo-400'
+        'Design': 'bg-pink-500 dark:bg-pink-400',
+        'HR': 'bg-rose-500 dark:bg-rose-400',
+        'Accounts': 'bg-amber-500 dark:bg-amber-400',
+        'Management': 'bg-indigo-500 dark:bg-indigo-400',
+        'Admin': 'bg-slate-400 dark:bg-slate-500'
       };
 
       tbody.innerHTML = filtered.map((emp, idx) => {
@@ -5696,6 +6160,13 @@
 
     function onEODNameChange() {
       selectedEODName = document.getElementById('eod-name-dropdown').value;
+      if (selectedEODName !== 'ALL') {
+        const staffRow = allEODRows.find(r => r.name.toUpperCase() === selectedEODName.toUpperCase());
+        if (staffRow) {
+          selectedEODDept = staffRow.department || 'ALL';
+          selectedEODDesig = staffRow.designation || 'ALL';
+        }
+      }
       updateEODCascadingDropdowns();
       applyEODFiltersAndRender();
     }
@@ -5708,6 +6179,13 @@
 
     function onEODDesigChange() {
       selectedEODDesig = document.getElementById('eod-desig-dropdown').value;
+      if (selectedEODDesig !== 'ALL') {
+        const matching = allEODRows.filter(r => r.designation.toUpperCase() === selectedEODDesig.toUpperCase());
+        const depts = Array.from(new Set(matching.map(r => r.department)));
+        if (depts.length === 1) {
+          selectedEODDept = depts[0];
+        }
+      }
       updateEODCascadingDropdowns();
       applyEODFiltersAndRender();
     }
@@ -5732,59 +6210,63 @@
     }
 
     function updateEODCascadingDropdowns() {
-      // 1. Available Names (matching date range, dept, desig, active status)
+      const nameDropdown = document.getElementById('eod-name-dropdown');
+      const deptDropdown = document.getElementById('eod-dept-dropdown');
+      const desigDropdown = document.getElementById('eod-desig-dropdown');
+      if (!nameDropdown || !deptDropdown || !desigDropdown) return;
+
+      // 1. Available Names (connected with date range, dept, desig)
       const nameRows = allEODRows.filter(r => {
         if (!isStaffIncluded(r.name)) return false;
         if (r.reportDate && eodStartDate && r.reportDate < eodStartDate) return false;
         if (r.reportDate && eodEndDate && r.reportDate > eodEndDate) return false;
-        if (selectedEODDept !== 'ALL' && r.department !== selectedEODDept) return false;
-        if (selectedEODDesig !== 'ALL' && r.designation !== selectedEODDesig) return false;
+        if (selectedEODDept !== 'ALL' && r.department.toUpperCase() !== selectedEODDept.toUpperCase()) return false;
+        if (selectedEODDesig !== 'ALL' && r.designation.toUpperCase() !== selectedEODDesig.toUpperCase()) return false;
         return true;
       });
       const availNames = Array.from(new Set(nameRows.map(r => r.name))).filter(Boolean).sort();
 
-      // 2. Available Depts (matching date range, name, desig, active status)
+      // 2. Available Depts (connected with date range, name, desig)
       const deptRows = allEODRows.filter(r => {
         if (!isStaffIncluded(r.name)) return false;
         if (r.reportDate && eodStartDate && r.reportDate < eodStartDate) return false;
         if (r.reportDate && eodEndDate && r.reportDate > eodEndDate) return false;
-        if (selectedEODName !== 'ALL' && r.name !== selectedEODName) return false;
-        if (selectedEODDesig !== 'ALL' && r.designation !== selectedEODDesig) return false;
+        if (selectedEODName !== 'ALL' && r.name.toUpperCase() !== selectedEODName.toUpperCase()) return false;
+        if (selectedEODDesig !== 'ALL' && r.designation.toUpperCase() !== selectedEODDesig.toUpperCase()) return false;
         return true;
       });
       const availDepts = Array.from(new Set(deptRows.map(r => r.department))).filter(Boolean).sort();
 
-      // 3. Available Desigs (matching date range, name, dept, active status)
+      // 3. Available Desigs (connected with date range, name, dept)
       const desigRows = allEODRows.filter(r => {
         if (!isStaffIncluded(r.name)) return false;
         if (r.reportDate && eodStartDate && r.reportDate < eodStartDate) return false;
         if (r.reportDate && eodEndDate && r.reportDate > eodEndDate) return false;
-        if (selectedEODName !== 'ALL' && r.name !== selectedEODName) return false;
-        if (selectedEODDept !== 'ALL' && r.department !== selectedEODDept) return false;
+        if (selectedEODName !== 'ALL' && r.name.toUpperCase() !== selectedEODName.toUpperCase()) return false;
+        if (selectedEODDept !== 'ALL' && r.department.toUpperCase() !== selectedEODDept.toUpperCase()) return false;
         return true;
       });
       const availDesigs = Array.from(new Set(desigRows.map(r => r.designation))).filter(Boolean).sort();
 
-      // Populate Name Dropdown
-      const nameDropdown = document.getElementById('eod-name-dropdown');
-      if (nameDropdown) {
-        if (!availNames.includes(selectedEODName)) selectedEODName = 'ALL';
-        nameDropdown.innerHTML = '<option value="ALL">ALL</option>' + availNames.map(n => `<option value="${n}" ${n === selectedEODName ? 'selected' : ''}>${n}</option>`).join('');
+      // Validate selections against connected available options
+      if (selectedEODName !== 'ALL' && !availNames.map(n => n.toUpperCase()).includes(selectedEODName.toUpperCase())) {
+        selectedEODName = 'ALL';
+      }
+      if (selectedEODDept !== 'ALL' && !availDepts.map(d => d.toUpperCase()).includes(selectedEODDept.toUpperCase())) {
+        selectedEODDept = 'ALL';
+      }
+      if (selectedEODDesig !== 'ALL' && !availDesigs.map(d => d.toUpperCase()).includes(selectedEODDesig.toUpperCase())) {
+        selectedEODDesig = 'ALL';
       }
 
-      // Populate Dept Dropdown
-      const deptDropdown = document.getElementById('eod-dept-dropdown');
-      if (deptDropdown) {
-        if (!availDepts.includes(selectedEODDept)) selectedEODDept = 'ALL';
-        deptDropdown.innerHTML = '<option value="ALL">ALL</option>' + availDepts.map(d => `<option value="${d}" ${d === selectedEODDept ? 'selected' : ''}>${d}</option>`).join('');
-      }
+      // Populate Name Dropdown with only connected options
+      nameDropdown.innerHTML = '<option value="ALL">ALL</option>' + availNames.map(n => `<option value="${n}" ${n.toUpperCase() === selectedEODName.toUpperCase() ? 'selected' : ''}>${n}</option>`).join('');
 
-      // Populate Desig Dropdown
-      const desigDropdown = document.getElementById('eod-desig-dropdown');
-      if (desigDropdown) {
-        if (!availDesigs.includes(selectedEODDesig)) selectedEODDesig = 'ALL';
-        desigDropdown.innerHTML = '<option value="ALL">ALL</option>' + availDesigs.map(d => `<option value="${d}" ${d === selectedEODDesig ? 'selected' : ''}>${d}</option>`).join('');
-      }
+      // Populate Dept Dropdown with only connected options
+      deptDropdown.innerHTML = '<option value="ALL">ALL</option>' + availDepts.map(d => `<option value="${d}" ${d.toUpperCase() === selectedEODDept.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
+
+      // Populate Desig Dropdown with only connected options
+      desigDropdown.innerHTML = '<option value="ALL">ALL</option>' + availDesigs.map(d => `<option value="${d}" ${d.toUpperCase() === selectedEODDesig.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
     }
 
     function applyEODFiltersAndRender() {
@@ -5792,9 +6274,9 @@
         if (!isStaffIncluded(r.name)) return false;
         if (r.reportDate && eodStartDate && r.reportDate < eodStartDate) return false;
         if (r.reportDate && eodEndDate && r.reportDate > eodEndDate) return false;
-        if (selectedEODName !== 'ALL' && r.name !== selectedEODName) return false;
-        if (selectedEODDept !== 'ALL' && r.department !== selectedEODDept) return false;
-        if (selectedEODDesig !== 'ALL' && r.designation !== selectedEODDesig) return false;
+        if (selectedEODName !== 'ALL' && r.name.toUpperCase() !== selectedEODName.toUpperCase()) return false;
+        if (selectedEODDept !== 'ALL' && r.department.toUpperCase() !== selectedEODDept.toUpperCase()) return false;
+        if (selectedEODDesig !== 'ALL' && r.designation.toUpperCase() !== selectedEODDesig.toUpperCase()) return false;
         return true;
       });
 
@@ -5906,34 +6388,73 @@
       if (!nameDropdown || !deptDropdown || !desigDropdown) return;
 
       const activeWeeklyRows = allWeeklyRows.filter(r => isStaffIncluded(r.staffName));
-      const names = Array.from(new Set(activeWeeklyRows.map(r => r.staffName).filter(Boolean))).sort();
 
-      if (selectedWeeklyName !== 'ALL' && !names.map(n => n.toUpperCase()).includes(selectedWeeklyName.toUpperCase())) {
+      // 1. Available Names (connected with dept, desig, week)
+      const nameRows = activeWeeklyRows.filter(r => {
+        if (selectedWeeklyDept !== 'ALL' && r.department.toUpperCase() !== selectedWeeklyDept.toUpperCase()) return false;
+        if (selectedWeeklyDesig !== 'ALL' && r.designation.toUpperCase() !== selectedWeeklyDesig.toUpperCase()) return false;
+        if (selectedWeeklyWeek !== 'ALL' && r.week.toUpperCase() !== selectedWeeklyWeek.toUpperCase()) return false;
+        return true;
+      });
+      const availNames = Array.from(new Set(nameRows.map(r => r.staffName).filter(Boolean))).sort();
+
+      // 2. Available Depts (connected with name, desig, week)
+      const deptRows = activeWeeklyRows.filter(r => {
+        if (selectedWeeklyName !== 'ALL' && r.staffName.toUpperCase() !== selectedWeeklyName.toUpperCase()) return false;
+        if (selectedWeeklyDesig !== 'ALL' && r.designation.toUpperCase() !== selectedWeeklyDesig.toUpperCase()) return false;
+        if (selectedWeeklyWeek !== 'ALL' && r.week.toUpperCase() !== selectedWeeklyWeek.toUpperCase()) return false;
+        return true;
+      });
+      const availDepts = Array.from(new Set(deptRows.map(r => r.department))).filter(Boolean).sort();
+
+      // 3. Available Desigs (connected with name, dept, week)
+      const desigRows = activeWeeklyRows.filter(r => {
+        if (selectedWeeklyName !== 'ALL' && r.staffName.toUpperCase() !== selectedWeeklyName.toUpperCase()) return false;
+        if (selectedWeeklyDept !== 'ALL' && r.department.toUpperCase() !== selectedWeeklyDept.toUpperCase()) return false;
+        if (selectedWeeklyWeek !== 'ALL' && r.week.toUpperCase() !== selectedWeeklyWeek.toUpperCase()) return false;
+        return true;
+      });
+      const availDesigs = Array.from(new Set(desigRows.map(r => r.designation))).filter(Boolean).sort();
+
+      // 4. Available Weeks (connected with name, dept, desig)
+      const weekRows = activeWeeklyRows.filter(r => {
+        if (selectedWeeklyName !== 'ALL' && r.staffName.toUpperCase() !== selectedWeeklyName.toUpperCase()) return false;
+        if (selectedWeeklyDept !== 'ALL' && r.department.toUpperCase() !== selectedWeeklyDept.toUpperCase()) return false;
+        if (selectedWeeklyDesig !== 'ALL' && r.designation.toUpperCase() !== selectedWeeklyDesig.toUpperCase()) return false;
+        return true;
+      });
+      const availWeeks = getChronologicalWeeks(weekRows);
+
+      // Validate selections against connected available options
+      if (selectedWeeklyName !== 'ALL' && !availNames.map(n => n.toUpperCase()).includes(selectedWeeklyName.toUpperCase())) {
         selectedWeeklyName = 'ALL';
+      }
+      if (selectedWeeklyDept !== 'ALL' && !availDepts.map(d => d.toUpperCase()).includes(selectedWeeklyDept.toUpperCase())) {
         selectedWeeklyDept = 'ALL';
+      }
+      if (selectedWeeklyDesig !== 'ALL' && !availDesigs.map(d => d.toUpperCase()).includes(selectedWeeklyDesig.toUpperCase())) {
         selectedWeeklyDesig = 'ALL';
       }
-
-      nameDropdown.innerHTML = '<option value="ALL">ALL STAFF</option>' + 
-        names.map(n => `<option value="${n}" ${n.toUpperCase() === selectedWeeklyName.toUpperCase() ? 'selected' : ''}>${n}</option>`).join('');
-
-      let filtered = activeWeeklyRows;
-      if (selectedWeeklyName !== 'ALL') {
-        filtered = filtered.filter(r => r.staffName.toUpperCase() === selectedWeeklyName.toUpperCase());
+      if (selectedWeeklyWeek !== 'ALL' && !availWeeks.map(w => w.toUpperCase()).includes(selectedWeeklyWeek.toUpperCase())) {
+        selectedWeeklyWeek = 'ALL';
       }
 
-      const depts = Array.from(new Set(filtered.map(r => r.department).filter(Boolean))).sort();
+      // Populate Name Dropdown with only connected options
+      nameDropdown.innerHTML = '<option value="ALL">ALL STAFF</option>' + 
+        availNames.map(n => `<option value="${n}" ${n.toUpperCase() === selectedWeeklyName.toUpperCase() ? 'selected' : ''}>${n}</option>`).join('');
+
+      // Populate Dept Dropdown with only connected options
       deptDropdown.innerHTML = '<option value="ALL">ALL DEPARTMENTS</option>' +
-        depts.map(d => `<option value="${d}" ${d.toUpperCase() === selectedWeeklyDept.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
+        availDepts.map(d => `<option value="${d}" ${d.toUpperCase() === selectedWeeklyDept.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
 
-      const desigs = Array.from(new Set(filtered.map(r => r.designation).filter(Boolean))).sort();
+      // Populate Desig Dropdown with only connected options
       desigDropdown.innerHTML = '<option value="ALL">ALL DESIGNATIONS</option>' +
-        desigs.map(d => `<option value="${d}" ${d.toUpperCase() === selectedWeeklyDesig.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
+        availDesigs.map(d => `<option value="${d}" ${d.toUpperCase() === selectedWeeklyDesig.toUpperCase() ? 'selected' : ''}>${d}</option>`).join('');
 
+      // Populate Week Dropdown with only connected options
       if (weekDropdown) {
-        const weeks = getChronologicalWeeks(allWeeklyRows);
         weekDropdown.innerHTML = '<option value="ALL">ALL WEEKS</option>' +
-          weeks.map(w => `<option value="${w}" ${w.toUpperCase() === selectedWeeklyWeek.toUpperCase() ? 'selected' : ''}>${w}</option>`).join('');
+          availWeeks.map(w => `<option value="${w}" ${w.toUpperCase() === selectedWeeklyWeek.toUpperCase() ? 'selected' : ''}>${w}</option>`).join('');
       }
     }
 
@@ -5946,9 +6467,6 @@
           selectedWeeklyDept = latestRow.department || 'ALL';
           selectedWeeklyDesig = latestRow.designation || 'ALL';
         }
-      } else {
-        selectedWeeklyDept = 'ALL';
-        selectedWeeklyDesig = 'ALL';
       }
       updateWeeklyCascadingDropdowns();
       renderWeeklyReportView();
@@ -5956,17 +6474,27 @@
 
     function onWeeklyDeptChange() {
       selectedWeeklyDept = document.getElementById('weekly-dept-dropdown').value;
+      updateWeeklyCascadingDropdowns();
       renderWeeklyReportView();
     }
 
     function onWeeklyDesigChange() {
       selectedWeeklyDesig = document.getElementById('weekly-desig-dropdown').value;
+      if (selectedWeeklyDesig !== 'ALL') {
+        const matching = allWeeklyRows.filter(r => r.designation.toUpperCase() === selectedWeeklyDesig.toUpperCase());
+        const depts = Array.from(new Set(matching.map(r => r.department)));
+        if (depts.length === 1) {
+          selectedWeeklyDept = depts[0];
+        }
+      }
+      updateWeeklyCascadingDropdowns();
       renderWeeklyReportView();
     }
 
     function onWeeklyWeekChange() {
       const weekDropdown = document.getElementById('weekly-week-dropdown');
       if (weekDropdown) selectedWeeklyWeek = weekDropdown.value;
+      updateWeeklyCascadingDropdowns();
       renderWeeklyReportView();
     }
 
@@ -6733,9 +7261,9 @@
         totalWorkingDays: 6,
         daysPresent: 5,
         daysAbsent: 1,
-        lateArrivals: 2,
+        lateArrivals: 1,
         leaveTaken: 1,
-        punctualityRating: 3,
+        punctualityRating: 4,
         consistencyRate: 'Good',
         taskCompletionRate: '75–89%',
         qualityOfWork: 4,
@@ -6747,108 +7275,233 @@
         disciplinaryDetails: 'Nil',
         trainingNeeded: 'No',
         trainingDetails: '',
-        areasToImprove: 'Communication',
+        areasToImprove: 'Performance Marketing Automation',
         overallRating: 4
       },
       {
-        staffName: 'Sagar',
+        staffName: 'Hashir',
+        department: 'Academy',
+        designation: 'Academy Coordinator',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 6,
+        daysAbsent: 0,
+        lateArrivals: 0,
+        leaveTaken: 0,
+        punctualityRating: 5,
+        consistencyRate: 'Excellent',
+        taskCompletionRate: '90–100%',
+        qualityOfWork: 5,
+        priorityTasksCompleted: 'All priority tasks',
+        communicationCollab: 5,
+        discipline: 5,
+        initiativeOwnership: 5,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Student Feedback Follow-up',
+        overallRating: 5
+      },
+      {
+        staffName: 'Arjun',
+        department: 'Tech',
+        designation: 'MERN Stack Developer',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 5,
+        daysAbsent: 1,
+        lateArrivals: 1,
+        leaveTaken: 1,
+        punctualityRating: 4,
+        consistencyRate: 'Good',
+        taskCompletionRate: '75–89%',
+        qualityOfWork: 4,
+        priorityTasksCompleted: 'Most of the tasks',
+        communicationCollab: 4,
+        discipline: 4,
+        initiativeOwnership: 4,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'API Integration Testing',
+        overallRating: 4
+      },
+      {
+        staffName: 'Gopika',
+        department: 'HR',
+        designation: 'HR Executive',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 6,
+        daysAbsent: 0,
+        lateArrivals: 0,
+        leaveTaken: 0,
+        punctualityRating: 5,
+        consistencyRate: 'Excellent',
+        taskCompletionRate: '90–100%',
+        qualityOfWork: 5,
+        priorityTasksCompleted: 'All priority tasks',
+        communicationCollab: 5,
+        discipline: 5,
+        initiativeOwnership: 5,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Talent Acquisition Turnaround',
+        overallRating: 5
+      },
+      {
+        staffName: 'Jamsheed',
+        department: 'Design',
+        designation: 'Graphic Designer',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 5,
+        daysAbsent: 1,
+        lateArrivals: 1,
+        leaveTaken: 1,
+        punctualityRating: 4,
+        consistencyRate: 'Good',
+        taskCompletionRate: '75–89%',
+        qualityOfWork: 4,
+        priorityTasksCompleted: 'Most of the tasks',
+        communicationCollab: 4,
+        discipline: 4,
+        initiativeOwnership: 4,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Brand Guideline Documentation',
+        overallRating: 4
+      },
+      {
+        staffName: 'Hissath',
+        department: 'Accounts',
+        designation: 'Accountant',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 6,
+        daysAbsent: 0,
+        lateArrivals: 0,
+        leaveTaken: 0,
+        punctualityRating: 5,
+        consistencyRate: 'Excellent',
+        taskCompletionRate: '90–100%',
+        qualityOfWork: 5,
+        priorityTasksCompleted: 'All priority tasks',
+        communicationCollab: 4,
+        discipline: 5,
+        initiativeOwnership: 4,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Weekly Invoice Reconciliation',
+        overallRating: 5
+      },
+      {
+        staffName: 'Shahana',
+        department: 'Academy',
+        designation: 'SHO',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 5,
+        daysAbsent: 1,
+        lateArrivals: 0,
+        leaveTaken: 1,
+        punctualityRating: 5,
+        consistencyRate: 'Good',
+        taskCompletionRate: '75–89%',
+        qualityOfWork: 4,
+        priorityTasksCompleted: 'Most of the tasks',
+        communicationCollab: 4,
+        discipline: 4,
+        initiativeOwnership: 4,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Audit Logs Submission',
+        overallRating: 4
+      },
+      {
+        staffName: 'Vishnupriya',
+        department: 'Marketing',
+        designation: 'Content Creator',
+        week: 'Week 3',
+        totalWorkingDays: 6,
+        daysPresent: 5,
+        daysAbsent: 1,
+        lateArrivals: 1,
+        leaveTaken: 1,
+        punctualityRating: 4,
+        consistencyRate: 'Good',
+        taskCompletionRate: '75–89%',
+        qualityOfWork: 4,
+        priorityTasksCompleted: 'Most of the tasks',
+        communicationCollab: 4,
+        discipline: 4,
+        initiativeOwnership: 4,
+        disciplinaryIssue: 'No',
+        disciplinaryDetails: 'Nil',
+        trainingNeeded: 'No',
+        trainingDetails: '',
+        areasToImprove: 'Content Calendar Scheduling',
+        overallRating: 4
+      },
+      {
+        staffName: 'Nihala',
         department: 'Marketing',
         designation: 'Marketing Head',
         week: 'Week 4',
         totalWorkingDays: 6,
-        daysPresent: 5,
-        daysAbsent: 1,
-        lateArrivals: 2,
-        leaveTaken: 1,
-        punctualityRating: 3,
-        consistencyRate: 'Good',
-        taskCompletionRate: '75–89%',
-        qualityOfWork: 4,
-        priorityTasksCompleted: 'Most of the tasks',
-        communicationCollab: 4,
-        discipline: 4,
-        initiativeOwnership: 4,
+        daysPresent: 6,
+        daysAbsent: 0,
+        lateArrivals: 1,
+        leaveTaken: 0,
+        punctualityRating: 5,
+        consistencyRate: 'Excellent',
+        taskCompletionRate: '90–100%',
+        qualityOfWork: 5,
+        priorityTasksCompleted: 'All priority tasks',
+        communicationCollab: 5,
+        discipline: 5,
+        initiativeOwnership: 5,
         disciplinaryIssue: 'No',
         disciplinaryDetails: 'Nil',
         trainingNeeded: 'No',
         trainingDetails: '',
-        areasToImprove: 'Analytics',
-        overallRating: 3
-      },
-      {
-        staffName: 'Hshir',
-        department: 'Marketing',
-        designation: 'Marketing Head',
-        week: 'Week 5',
-        totalWorkingDays: 6,
-        daysPresent: 5,
-        daysAbsent: 1,
-        lateArrivals: 2,
-        leaveTaken: 1,
-        punctualityRating: 3,
-        consistencyRate: 'Good',
-        taskCompletionRate: '75–89%',
-        qualityOfWork: 4,
-        priorityTasksCompleted: 'Most of the tasks',
-        communicationCollab: 4,
-        discipline: 4,
-        initiativeOwnership: 4,
-        disciplinaryIssue: 'No',
-        disciplinaryDetails: 'Nil',
-        trainingNeeded: 'No',
-        trainingDetails: '',
-        areasToImprove: 'Analytics',
+        areasToImprove: 'Cross-channel Campaign Synergy',
         overallRating: 5
       },
       {
-        staffName: 'nirosh',
-        department: 'Marketing',
-        designation: 'Marketing Head',
-        week: 'Week 6',
+        staffName: 'Hashir',
+        department: 'Academy',
+        designation: 'Academy Coordinator',
+        week: 'Week 4',
         totalWorkingDays: 6,
-        daysPresent: 5,
-        daysAbsent: 1,
-        lateArrivals: 2,
-        leaveTaken: 1,
-        punctualityRating: 3,
-        consistencyRate: 'Good',
-        taskCompletionRate: '75–89%',
-        qualityOfWork: 4,
-        priorityTasksCompleted: 'Most of the tasks',
-        communicationCollab: 4,
-        discipline: 4,
-        initiativeOwnership: 4,
+        daysPresent: 6,
+        daysAbsent: 0,
+        lateArrivals: 0,
+        leaveTaken: 0,
+        punctualityRating: 5,
+        consistencyRate: 'Excellent',
+        taskCompletionRate: '90–100%',
+        qualityOfWork: 5,
+        priorityTasksCompleted: 'All priority tasks',
+        communicationCollab: 5,
+        discipline: 5,
+        initiativeOwnership: 5,
         disciplinaryIssue: 'No',
         disciplinaryDetails: 'Nil',
         trainingNeeded: 'No',
         trainingDetails: '',
-        areasToImprove: 'Analytics',
-        overallRating: 1
-      },
-      {
-        staffName: 'fasal',
-        department: 'Marketing',
-        designation: 'Marketing Head',
-        week: 'Week 7',
-        totalWorkingDays: 6,
-        daysPresent: 5,
-        daysAbsent: 1,
-        lateArrivals: 2,
-        leaveTaken: 1,
-        punctualityRating: 3,
-        consistencyRate: 'Good',
-        taskCompletionRate: '75–89%',
-        qualityOfWork: 4,
-        priorityTasksCompleted: 'Most of the tasks',
-        communicationCollab: 4,
-        discipline: 4,
-        initiativeOwnership: 4,
-        disciplinaryIssue: 'No',
-        disciplinaryDetails: 'Nil',
-        trainingNeeded: 'No',
-        trainingDetails: '',
-        areasToImprove: 'Analytics',
-        overallRating: 2
+        areasToImprove: 'Curriculum Enhancement',
+        overallRating: 5
       }
     ];
 
@@ -6930,13 +7583,17 @@
 
         if (!name) return;
 
+        const canonName = canonicalizeStaffName(name);
+        const canonDept = canonicalizeDepartment(dept, canonName);
+        const canonDesig = canonicalizeDesignation(desig, canonName);
+
         const parsedTime = timestamp ? new Date(timestamp).getTime() : NaN;
         const timeVal = !isNaN(parsedTime) ? parsedTime : idx;
 
         weeklyAcc.push({
-          staffName: name,
-          department: dept || 'N/A',
-          designation: desig || 'N/A',
+          staffName: canonName,
+          department: canonDept || 'N/A',
+          designation: canonDesig || 'N/A',
           week: week || 'N/A',
           timestamp: timestamp,
           timeVal: timeVal,
@@ -7095,46 +7752,52 @@
       return rowsAcc;
     }
 
-    function renderRepDropdownOptions() {
+    function updateTelecallingCascadingDropdowns() {
       const dropdown = document.getElementById('sales-rep-dropdown');
       const chartDropdown = document.getElementById('chart-rep-dropdown');
-      const prevVal = dropdown.value;
-      const prevChartVal = chartDropdown ? chartDropdown.value : 'ALL';
+      const sourceDropdown = document.getElementById('source-dropdown');
+      if (!dropdown) return;
 
-      dropdown.innerHTML = `<option value="ALL">ALL</option>`;
-      if (chartDropdown) chartDropdown.innerHTML = `<option value="ALL">ALL REPS</option>`;
-
-      availableReps.forEach(rep => {
-        const opt = document.createElement('option');
-        opt.value = rep;
-        opt.innerText = rep;
-        dropdown.appendChild(opt);
-
-        if (chartDropdown) {
-          const opt2 = document.createElement('option');
-          opt2.value = rep;
-          opt2.innerText = rep;
-          chartDropdown.appendChild(opt2);
-        }
+      // 1. Available Reps (matching active date range & selectedSource)
+      const repRows = allProcessedRows.filter(r => {
+        if (r.date && activeStartDate && r.date < activeStartDate) return false;
+        if (r.date && activeEndDate && r.date > activeEndDate) return false;
+        if (selectedSource !== 'ALL' && r.source !== selectedSource) return false;
+        return true;
       });
+      const availReps = Array.from(new Set(repRows.map(r => r.rep).filter(Boolean))).sort();
 
-      if (availableReps.includes(prevVal)) {
-        dropdown.value = prevVal;
-        selectedRep = prevVal;
-      } else {
-        dropdown.value = 'ALL';
+      // 2. Available Sources (matching active date range & selectedRep)
+      const sourceRows = allProcessedRows.filter(r => {
+        if (r.date && activeStartDate && r.date < activeStartDate) return false;
+        if (r.date && activeEndDate && r.date > activeEndDate) return false;
+        if (selectedRep !== 'ALL' && r.rep !== selectedRep) return false;
+        return true;
+      });
+      const availSources = Array.from(new Set(sourceRows.map(r => r.source).filter(Boolean))).sort();
+
+      if (selectedRep !== 'ALL' && !availReps.includes(selectedRep)) {
         selectedRep = 'ALL';
+        selectedEmployee = 'ALL';
+      }
+      if (selectedSource !== 'ALL' && !availSources.includes(selectedSource)) {
+        selectedSource = 'ALL';
       }
 
+      dropdown.innerHTML = '<option value="ALL">ALL</option>' + availReps.map(r => `<option value="${r}" ${r === selectedRep ? 'selected' : ''}>${r}</option>`).join('');
       if (chartDropdown) {
-        if (availableReps.includes(prevChartVal)) {
-          chartDropdown.value = prevChartVal;
-        } else {
-          chartDropdown.value = 'ALL';
-        }
+        chartDropdown.innerHTML = '<option value="ALL">ALL REPS</option>' + availReps.map(r => `<option value="${r}" ${r === selectedRep ? 'selected' : ''}>${r}</option>`).join('');
+      }
+
+      if (sourceDropdown) {
+        sourceDropdown.innerHTML = '<option value="ALL">ALL</option>' + availSources.map(s => `<option value="${s}" ${s === selectedSource ? 'selected' : ''}>${s}</option>`).join('');
       }
 
       updateFilterBadge();
+    }
+
+    function renderRepDropdownOptions() {
+      updateTelecallingCascadingDropdowns();
     }
 
     let isSidebarBranchOpen = false;
@@ -7236,10 +7899,8 @@
       selectedRep = document.getElementById('sales-rep-dropdown').value;
       if (selectedRep === 'ALL') {
         selectedEmployee = 'ALL';
-      } else if (selectedRep === 'HASHIR') {
-        selectedEmployee = 'HASHIR';
-      } else if (selectedRep === 'HASEENA') {
-        selectedEmployee = 'HASEENA';
+      } else {
+        selectedEmployee = selectedRep;
       }
 
       // Sync active state on sidebar items matching Indigo theme
@@ -7253,13 +7914,13 @@
         }
       });
 
-      updateFilterBadge();
+      updateTelecallingCascadingDropdowns();
       applyFiltersAndRender();
     }
 
     function onSourceDropdownChange() {
       selectedSource = document.getElementById('source-dropdown').value;
-      updateFilterBadge();
+      updateTelecallingCascadingDropdowns();
       applyFiltersAndRender();
     }
 
@@ -7302,6 +7963,7 @@
       activeStartDate = document.getElementById('start-date-input').value;
       activeEndDate = document.getElementById('end-date-input').value;
       syncDateDisplays();
+      updateTelecallingCascadingDropdowns();
       applyFiltersAndRender();
     }
 
@@ -7355,6 +8017,7 @@
       document.getElementById('start-date-input').value = activeStartDate;
       document.getElementById('end-date-input').value = activeEndDate;
       syncDateDisplays();
+      updateTelecallingCascadingDropdowns();
       applyFiltersAndRender();
     }
 
@@ -7371,7 +8034,7 @@
       selectedSource = 'ALL';
       document.getElementById('source-dropdown').value = 'ALL';
 
-      updateFilterBadge();
+      updateTelecallingCascadingDropdowns();
       applyFiltersAndRender();
     }
 
@@ -8481,11 +9144,47 @@ function renderSingleParetoChart(canvasId, existingChartInstance, labels, barDat
 
       if (!monthSel || !courseSel || !modeSel || !statusSel) return;
 
-      // Extract unique values
-      const months = Array.from(new Set(allCalicutFinanceRows.map(r => r.admissionMonthFormatted).filter(Boolean))).sort();
-      const courses = Array.from(new Set(allCalicutFinanceRows.map(r => r.course).filter(Boolean))).sort();
-      const modes = Array.from(new Set(allCalicutFinanceRows.map(r => r.mode).filter(Boolean))).sort();
-      const statuses = Array.from(new Set(allCalicutFinanceRows.map(r => r.paymentStatus).filter(Boolean))).sort();
+      // 1. Available Months (connected with course, mode, status)
+      const monthRows = allCalicutFinanceRows.filter(r => {
+        if (selectedCalicutCourse !== 'ALL' && r.course !== selectedCalicutCourse) return false;
+        if (selectedCalicutMode !== 'ALL' && r.mode !== selectedCalicutMode) return false;
+        if (selectedCalicutStatus !== 'ALL' && r.paymentStatus !== selectedCalicutStatus) return false;
+        return true;
+      });
+      const months = Array.from(new Set(monthRows.map(r => r.admissionMonthFormatted).filter(Boolean))).sort();
+
+      // 2. Available Courses (connected with month, mode, status)
+      const courseRows = allCalicutFinanceRows.filter(r => {
+        if (selectedCalicutMonth !== 'ALL' && r.admissionMonthFormatted !== selectedCalicutMonth) return false;
+        if (selectedCalicutMode !== 'ALL' && r.mode !== selectedCalicutMode) return false;
+        if (selectedCalicutStatus !== 'ALL' && r.paymentStatus !== selectedCalicutStatus) return false;
+        return true;
+      });
+      const courses = Array.from(new Set(courseRows.map(r => r.course).filter(Boolean))).sort();
+
+      // 3. Available Modes (connected with month, course, status)
+      const modeRows = allCalicutFinanceRows.filter(r => {
+        if (selectedCalicutMonth !== 'ALL' && r.admissionMonthFormatted !== selectedCalicutMonth) return false;
+        if (selectedCalicutCourse !== 'ALL' && r.course !== selectedCalicutCourse) return false;
+        if (selectedCalicutStatus !== 'ALL' && r.paymentStatus !== selectedCalicutStatus) return false;
+        return true;
+      });
+      const modes = Array.from(new Set(modeRows.map(r => r.mode).filter(Boolean))).sort();
+
+      // 4. Available Statuses (connected with month, course, mode)
+      const statusRows = allCalicutFinanceRows.filter(r => {
+        if (selectedCalicutMonth !== 'ALL' && r.admissionMonthFormatted !== selectedCalicutMonth) return false;
+        if (selectedCalicutCourse !== 'ALL' && r.course !== selectedCalicutCourse) return false;
+        if (selectedCalicutMode !== 'ALL' && r.mode !== selectedCalicutMode) return false;
+        return true;
+      });
+      const statuses = Array.from(new Set(statusRows.map(r => r.paymentStatus).filter(Boolean))).sort();
+
+      // Validate selections against connected available options
+      if (selectedCalicutMonth !== 'ALL' && !months.includes(selectedCalicutMonth)) selectedCalicutMonth = 'ALL';
+      if (selectedCalicutCourse !== 'ALL' && !courses.includes(selectedCalicutCourse)) selectedCalicutCourse = 'ALL';
+      if (selectedCalicutMode !== 'ALL' && !modes.includes(selectedCalicutMode)) selectedCalicutMode = 'ALL';
+      if (selectedCalicutStatus !== 'ALL' && !statuses.includes(selectedCalicutStatus)) selectedCalicutStatus = 'ALL';
 
       monthSel.innerHTML = '<option value="ALL">All Months</option>' + months.map(m => `<option value="${m}" ${selectedCalicutMonth === m ? 'selected' : ''}>${m}</option>`).join('');
       courseSel.innerHTML = '<option value="ALL">All Courses</option>' + courses.map(c => `<option value="${c}" ${selectedCalicutCourse === c ? 'selected' : ''}>${c}</option>`).join('');
@@ -8504,6 +9203,7 @@ function renderSingleParetoChart(canvasId, existingChartInstance, labels, barDat
       if (modeSel) selectedCalicutMode = modeSel.value;
       if (statusSel) selectedCalicutStatus = statusSel.value;
 
+      updateCalicutFilterDropdowns();
       applyCalicutFiltersAndRender();
     }
 
@@ -8513,16 +9213,7 @@ function renderSingleParetoChart(canvasId, existingChartInstance, labels, barDat
       selectedCalicutMode = 'ALL';
       selectedCalicutStatus = 'ALL';
 
-      const monthSel = document.getElementById('calicut-filter-month');
-      const courseSel = document.getElementById('calicut-filter-course');
-      const modeSel = document.getElementById('calicut-filter-mode');
-      const statusSel = document.getElementById('calicut-filter-status');
-
-      if (monthSel) monthSel.value = 'ALL';
-      if (courseSel) courseSel.value = 'ALL';
-      if (modeSel) modeSel.value = 'ALL';
-      if (statusSel) statusSel.value = 'ALL';
-
+      updateCalicutFilterDropdowns();
       applyCalicutFiltersAndRender();
     }
 
