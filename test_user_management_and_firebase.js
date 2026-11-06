@@ -356,10 +356,11 @@ async function runTests() {
   assert(empRes.ok, `Firestore "ash_settings/employee_status" returns HTTP ${empRes.status}`);
 
   const empDoc = await empRes.json();
-  assert(empDoc.fields && empDoc.fields.statusMap && empDoc.fields.statusMap.mapValue, 'employee_status contains statusMap field');
+  const statusMapHolder = (empDoc.fields && (empDoc.fields.statuses || empDoc.fields.statusMap)) || null;
+  assert(Boolean(statusMapHolder && statusMapHolder.mapValue), 'employee_status contains statuses/statusMap field');
 
-  // Normalize statusMap to canonical staff names (eliminating duplicates like "Hshir" or "GOKUL KRISHNA")
-  const rawMapFields = (empDoc.fields.statusMap.mapValue && empDoc.fields.statusMap.mapValue.fields) || {};
+  // Normalize statuses map to canonical staff names (eliminating duplicates like "Hshir" or "GOKUL KRISHNA")
+  const rawMapFields = (statusMapHolder && statusMapHolder.mapValue && statusMapHolder.mapValue.fields) || {};
   const normalizedStatusMap = {};
 
   CANONICAL_STAFF.forEach(item => {
@@ -396,9 +397,10 @@ async function runTests() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       fields: {
-        statusMap: toRestValue(normalizedStatusMap),
+        statuses: toRestValue(normalizedStatusMap),
         filterMode: { stringValue: filterModeVal },
-        updatedAt: { stringValue: new Date().toISOString() }
+        updatedAt: { stringValue: new Date().toISOString() },
+        updatedBy: { stringValue: 'Sufail' }
       }
     })
   });
@@ -406,7 +408,7 @@ async function runTests() {
 
   const empVerifyRes = await fetch(empStatusUrl);
   const empVerifyDoc = await empVerifyRes.json();
-  const verifiedStaffKeys = Object.keys(empVerifyDoc.fields.statusMap.mapValue.fields);
+  const verifiedStaffKeys = Object.keys(empVerifyDoc.fields.statuses.mapValue.fields);
   assert(verifiedStaffKeys.includes('Hashir') && !verifiedStaffKeys.includes('Hshir'), 'Employee status map has canonical "Hashir" and no duplicate "Hshir"');
   assert(verifiedStaffKeys.includes('Gokul') && !verifiedStaffKeys.includes('GOKUL KRISHNA'), 'Employee status map has canonical "Gokul" and no duplicate "GOKUL KRISHNA"');
   assert(verifiedStaffKeys.length >= 16, `Firebase -> Dashboard employee_status returns ${verifiedStaffKeys.length} canonical staff members`);
@@ -420,7 +422,7 @@ async function runTests() {
   const latestDoc = await latestRes.json();
   assert(latestDoc.fields && latestDoc.fields.sheets && latestDoc.fields.sheets.mapValue, 'latest_data contains multi-sheet cache in Firestore');
   const cachedSheetNames = Object.keys(latestDoc.fields.sheets.mapValue.fields || {});
-  assert(cachedSheetNames.includes('Lead') && cachedSheetNames.includes('EOD') && cachedSheetNames.includes('Weekly'), `Firebase -> Dashboard latest_data has sheets: ${cachedSheetNames.join(', ')}`);
+  assert(cachedSheetNames.includes('EOD') && cachedSheetNames.includes('Weekly') && cachedSheetNames.includes('Calicut Finance'), `Firebase -> Dashboard latest_data has sheets: ${cachedSheetNames.join(', ')}`);
 
 
   console.log('\n=== 7. TESTING VERCEL SERVERLESS PROXY (/api/data) ===');
