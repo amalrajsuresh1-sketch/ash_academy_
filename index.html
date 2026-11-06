@@ -1506,16 +1506,56 @@
         <div class="table-container-8-rows max-h-[445px] rounded-2xl border border-slate-200/80 dark:border-slate-800 custom-scrollbar">
           <table class="w-full text-left text-xs border-collapse">
             <thead class="sticky top-0 z-10">
-              <tr class="bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider font-extrabold text-[11px]">
-                <th class="p-3.5 w-12 text-center">#</th>
-                <th class="p-3.5">Report Date</th>
-                <th class="p-3.5">Name</th>
-                <th class="p-3.5">Department</th>
-                <th class="p-3.5">Designation</th>
-                <th class="p-3.5 max-w-xs">Today's Task</th>
-                <th class="p-3.5 max-w-xs">Task's Completed</th>
-                <th class="p-3.5 max-w-xs">Task's Pending</th>
-                <th class="p-3.5 max-w-xs">Why Pending</th>
+              <tr class="bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider font-extrabold text-[11px] select-none border-b border-slate-200 dark:border-slate-700">
+                <th class="p-3.5 w-12 text-center text-slate-400">#</th>
+                <th onclick="sortEODTable('reportDate')" class="p-3.5 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Report Date</span>
+                    <span id="eod-sort-icon-reportDate" class="text-indigo-600 dark:text-indigo-400 font-bold text-[10px]">▼</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('name')" class="p-3.5 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Name</span>
+                    <span id="eod-sort-icon-name" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('department')" class="p-3.5 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Department</span>
+                    <span id="eod-sort-icon-department" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('designation')" class="p-3.5 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Designation</span>
+                    <span id="eod-sort-icon-designation" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('todayTask')" class="p-3.5 max-w-xs hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Today's Task</span>
+                    <span id="eod-sort-icon-todayTask" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('taskCompleted')" class="p-3.5 max-w-xs hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Task's Completed</span>
+                    <span id="eod-sort-icon-taskCompleted" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('taskPending')" class="p-3.5 max-w-xs hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Task's Pending</span>
+                    <span id="eod-sort-icon-taskPending" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortEODTable('whyPending')" class="p-3.5 max-w-xs hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Why Pending</span>
+                    <span id="eod-sort-icon-whyPending" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody id="eod-table-body" class="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
@@ -1846,19 +1886,74 @@
         <div class="table-container-8-rows max-h-[385px] rounded-xl border border-slate-200/80 dark:border-slate-800 custom-scrollbar">
           <table class="w-full text-left text-xs border-collapse">
             <thead class="sticky top-0 z-10">
-              <tr class="bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider font-extrabold text-[11px]">
-                <th class="p-3">#</th>
-                <th class="p-3">Week</th>
-                <th class="p-3">Staff Name</th>
-                <th class="p-3">Department</th>
-                <th class="p-3">Designation</th>
-                <th class="p-3">Overall Rating</th>
-                <th class="p-3">Attendance</th>
-                <th class="p-3">Task Comp %</th>
-                <th class="p-3">Punctuality</th>
-                <th class="p-3">Quality</th>
-                <th class="p-3">Discipline</th>
-                <th class="p-3">Training Needed</th>
+              <tr class="bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase tracking-wider font-extrabold text-[11px] select-none border-b border-slate-200 dark:border-slate-700">
+                <th class="p-3 w-10 text-center text-slate-400">#</th>
+                <th onclick="sortWeeklyTable('week')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Week</span>
+                    <span id="weekly-sort-icon-week" class="text-indigo-600 dark:text-indigo-400 font-bold text-[10px]">▲</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('staffName')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Staff Name</span>
+                    <span id="weekly-sort-icon-staffName" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('department')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Department</span>
+                    <span id="weekly-sort-icon-department" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('designation')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Designation</span>
+                    <span id="weekly-sort-icon-designation" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('overallRating')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Overall Rating</span>
+                    <span id="weekly-sort-icon-overallRating" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('attendance')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Attendance</span>
+                    <span id="weekly-sort-icon-attendance" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('taskCompletionRate')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Task Comp %</span>
+                    <span id="weekly-sort-icon-taskCompletionRate" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('punctualityRating')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Punctuality</span>
+                    <span id="weekly-sort-icon-punctualityRating" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('qualityOfWork')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Quality</span>
+                    <span id="weekly-sort-icon-qualityOfWork" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('discipline')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Discipline</span>
+                    <span id="weekly-sort-icon-discipline" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
+                <th onclick="sortWeeklyTable('trainingNeeded')" class="p-3 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer transition-colors whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span>Training Needed</span>
+                    <span id="weekly-sort-icon-trainingNeeded" class="text-slate-400 text-[10px]">↕</span>
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody id="weekly-table-body" class="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
@@ -4961,6 +5056,7 @@
         if (settingsSec) settingsSec.classList.add('hidden');
         if (dailySec) {
           dailySec.classList.remove('hidden');
+          if (typeof updateEODSortIcons === 'function') updateEODSortIcons();
           renderDailyReportView();
         }
       } else if (viewName === 'weekly-report') {
@@ -4975,6 +5071,7 @@
         if (settingsSec) settingsSec.classList.add('hidden');
         if (weeklySec) {
           weeklySec.classList.remove('hidden');
+          if (typeof updateWeeklySortIcons === 'function') updateWeeklySortIcons();
           renderWeeklyReportView();
         }
       } else if (viewName === 'calicut-branch' || viewName === 'calicut' || viewName === 'calicut_branch') {
@@ -6150,6 +6247,7 @@
       renderSidebarEmployeeDirectory();
       syncEODDateDisplays();
       updateEODCascadingDropdowns();
+      updateEODSortIcons();
       applyEODFiltersAndRender();
     }
 
@@ -6242,6 +6340,35 @@
       applyEODFiltersAndRender();
     }
 
+    let eodSortColumn = 'reportDate';
+    let eodSortAsc = false; // default: report date in descending order
+
+    function sortEODTable(colKey) {
+      if (eodSortColumn === colKey) {
+        eodSortAsc = !eodSortAsc;
+      } else {
+        eodSortColumn = colKey;
+        eodSortAsc = (colKey === 'reportDate') ? false : true;
+      }
+      updateEODSortIcons();
+      renderDailyReportView();
+    }
+
+    function updateEODSortIcons() {
+      const cols = ['reportDate', 'name', 'department', 'designation', 'todayTask', 'taskCompleted', 'taskPending', 'whyPending'];
+      cols.forEach(col => {
+        const el = document.getElementById(`eod-sort-icon-${col}`);
+        if (!el) return;
+        if (col === eodSortColumn) {
+          el.innerText = eodSortAsc ? '▲' : '▼';
+          el.className = 'text-indigo-600 dark:text-indigo-400 font-bold text-[10px]';
+        } else {
+          el.innerText = '↕';
+          el.className = 'text-slate-400 text-[10px]';
+        }
+      });
+    }
+
     function resetEODFilters() {
       const eodDates = allEODRows.map(r => r.reportDate).filter(Boolean).sort();
       eodStartDate = eodDates.length > 0 ? eodDates[0] : '2026-01-01';
@@ -6255,9 +6382,12 @@
       selectedEODName = 'ALL';
       selectedEODDept = 'ALL';
       selectedEODDesig = 'ALL';
+      eodSortColumn = 'reportDate';
+      eodSortAsc = false;
 
       syncEODDateDisplays();
       updateEODCascadingDropdowns();
+      updateEODSortIcons();
       applyEODFiltersAndRender();
     }
 
@@ -6401,6 +6531,27 @@
         return;
       }
 
+      // Sort filteredEODRows according to eodSortColumn and eodSortAsc (default: reportDate descending)
+      filteredEODRows.sort((a, b) => {
+        if (eodSortColumn === 'reportDate') {
+          const dateA = a.reportDate || '';
+          const dateB = b.reportDate || '';
+          const cmp = dateA.localeCompare(dateB);
+          if (cmp !== 0) return eodSortAsc ? cmp : -cmp;
+          return (a.name || '').localeCompare(b.name || '');
+        }
+
+        const valA = String(a[eodSortColumn] || '').trim();
+        const valB = String(b[eodSortColumn] || '').trim();
+        const cmp = valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
+        if (cmp !== 0) return eodSortAsc ? cmp : -cmp;
+
+        // Secondary tie-breaker: always keep reportDate descending
+        const dateA = a.reportDate || '';
+        const dateB = b.reportDate || '';
+        return dateB.localeCompare(dateA);
+      });
+
       filteredEODRows.forEach((r, idx) => {
         const tr = document.createElement('tr');
         tr.className = 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors text-slate-800 dark:text-slate-200 border-b border-slate-100 dark:border-slate-800/60';
@@ -6425,11 +6576,44 @@
     let selectedWeeklyDept = 'ALL';
     let selectedWeeklyDesig = 'ALL';
     let selectedWeeklyWeek = 'ALL';
+    let weeklySortColumn = 'week';
+    let weeklySortAsc = true; // default: week in ascending order
     let weeklyTrendChart = null;
 
     function initWeeklyModule() {
       updateWeeklyCascadingDropdowns();
+      updateWeeklySortIcons();
       renderWeeklyReportView();
+    }
+
+    function sortWeeklyTable(colKey) {
+      if (weeklySortColumn === colKey) {
+        weeklySortAsc = !weeklySortAsc;
+      } else {
+        weeklySortColumn = colKey;
+        weeklySortAsc = true;
+      }
+      updateWeeklySortIcons();
+      renderWeeklyReportView();
+    }
+
+    function updateWeeklySortIcons() {
+      const cols = [
+        'week', 'staffName', 'department', 'designation',
+        'overallRating', 'attendance', 'taskCompletionRate',
+        'punctualityRating', 'qualityOfWork', 'discipline', 'trainingNeeded'
+      ];
+      cols.forEach(col => {
+        const el = document.getElementById(`weekly-sort-icon-${col}`);
+        if (!el) return;
+        if (col === weeklySortColumn) {
+          el.innerText = weeklySortAsc ? '▲' : '▼';
+          el.className = 'text-indigo-600 dark:text-indigo-400 font-bold text-[10px]';
+        } else {
+          el.innerText = '↕';
+          el.className = 'text-slate-400 text-[10px]';
+        }
+      });
     }
 
     function updateWeeklyCascadingDropdowns() {
@@ -6555,7 +6739,10 @@
       selectedWeeklyDept = 'ALL';
       selectedWeeklyDesig = 'ALL';
       selectedWeeklyWeek = 'ALL';
+      weeklySortColumn = 'week';
+      weeklySortAsc = true;
       updateWeeklyCascadingDropdowns();
+      updateWeeklySortIcons();
       renderWeeklyReportView();
     }
 
@@ -7278,7 +7465,46 @@
         return;
       }
 
-      rows.forEach((r, idx) => {
+      // Sort rows copy according to weeklySortColumn and weeklySortAsc (default: week ascending)
+      const sortedRows = [...rows].sort((a, b) => {
+        if (weeklySortColumn === 'week') {
+          const valA = String(a.week || '').trim();
+          const valB = String(b.week || '').trim();
+          const cmp = valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
+          if (cmp !== 0) return weeklySortAsc ? cmp : -cmp;
+          return (a.staffName || '').localeCompare(b.staffName || '');
+        }
+
+        if (weeklySortColumn === 'overallRating' || weeklySortColumn === 'punctualityRating' ||
+            weeklySortColumn === 'qualityOfWork' || weeklySortColumn === 'discipline') {
+          const numA = parseFloat(a[weeklySortColumn]) || 0;
+          const numB = parseFloat(b[weeklySortColumn]) || 0;
+          if (numA !== numB) return weeklySortAsc ? numA - numB : numB - numA;
+        } else if (weeklySortColumn === 'attendance') {
+          const presA = a.daysPresent !== undefined ? a.daysPresent : 0;
+          const presB = b.daysPresent !== undefined ? b.daysPresent : 0;
+          if (presA !== presB) return weeklySortAsc ? presA - presB : presB - presA;
+          const absA = a.daysAbsent !== undefined ? a.daysAbsent : 0;
+          const absB = b.daysAbsent !== undefined ? b.daysAbsent : 0;
+          if (absA !== absB) return weeklySortAsc ? absA - absB : absB - absA;
+        } else if (weeklySortColumn === 'taskCompletionRate') {
+          const numA = parseFloat(String(a.taskCompletionRate || '').replace(/[^\d.]/g, '')) || 0;
+          const numB = parseFloat(String(b.taskCompletionRate || '').replace(/[^\d.]/g, '')) || 0;
+          if (numA !== numB) return weeklySortAsc ? numA - numB : numB - numA;
+        } else {
+          const valA = String(a[weeklySortColumn] || '').trim();
+          const valB = String(b[weeklySortColumn] || '').trim();
+          const cmp = valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
+          if (cmp !== 0) return weeklySortAsc ? cmp : -cmp;
+        }
+
+        // Default secondary tie-breaker: week in ascending order, then staffName
+        const weekCmp = String(a.week || '').localeCompare(String(b.week || ''), undefined, { numeric: true, sensitivity: 'base' });
+        if (weekCmp !== 0) return weekCmp;
+        return (a.staffName || '').localeCompare(b.staffName || '');
+      });
+
+      sortedRows.forEach((r, idx) => {
         const tr = document.createElement('tr');
         tr.className = 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors text-slate-800 dark:text-slate-200 border-b border-slate-100 dark:border-slate-800/60';
 
