@@ -457,10 +457,13 @@ async function runTests() {
   envHandler(mockReq, mockEnvRes);
   assert(mockEnvRes.statusCode === 200, `api/env.js responded with HTTP ${mockEnvRes.statusCode}`);
   assert(envResult && (envResult.API_URL || envResult.dataPath), 'api/env.js returned configuration');
+  assert(envResult && envResult.firebaseConfig && envResult.firebaseConfig.projectId === 'dashboard-cloud-4bdfa', 'api/env.js returns firebaseConfig from environment variables');
 
 
   console.log('\n=== 9. TESTING INDEX.HTML DOM STRUCTURE & BIDIRECTIONAL SYNC LOGIC ===');
   const htmlContent = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8');
+  const dataJsContent = fs.readFileSync(path.join(__dirname, 'api', 'data.js'), 'utf-8');
+  const envJsContent = fs.readFileSync(path.join(__dirname, 'api', 'env.js'), 'utf-8');
 
   assert(htmlContent.includes('id="sidebar-settings-section"'), 'Sidebar includes Settings & Users section');
   assert(htmlContent.includes('id="nav-settings-btn"'), 'Sidebar includes nav-settings-btn');
@@ -480,10 +483,15 @@ async function runTests() {
   assert(htmlContent.includes("switchView('settings')") || htmlContent.includes("viewName === 'settings'"), 'switchView handles settings');
   assert(htmlContent.includes("'ash-user'"), 'index.html uses document "ash-user" for user storage');
 
-  // Verify that NO passwords or credentials are hardcoded in index.html
+  // Verify that NO passwords, API URLs, or Firebase keys are hardcoded in index.html, api/data.js, or api/env.js
   assert(!htmlContent.includes('ashcm@3212'), 'sufailash password is NOT hardcoded in HTML');
   assert(!htmlContent.includes('hasac@123'), 'hashirash password is NOT hardcoded in HTML');
   assert(!htmlContent.includes('hrash@1234'), 'ashgopika password is NOT hardcoded in HTML');
+  assert(!htmlContent.includes('script.google.com'), 'Google Apps Script URL is NOT hardcoded in index.html');
+  assert(!htmlContent.includes('AIzaSyCruCfmmN68FTMSkYNGOOGoJTa3lRulFfY'), 'Firebase API key is NOT hardcoded in index.html');
+  assert(!htmlContent.includes('dashboard-cloud-4bdfa'), 'Firebase projectId is NOT hardcoded in index.html');
+  assert(!dataJsContent.includes('script.google.com'), 'Google Apps Script URL is NOT hardcoded in api/data.js');
+  assert(!envJsContent.includes('script.google.com'), 'Google Apps Script URL is NOT hardcoded in api/env.js');
 
   console.log(`\n========================================`);
   console.log(`TEST RESULTS: ${testsPassed} / ${testsTotal} PASSED (${Math.round((testsPassed / testsTotal) * 100)}%)`);

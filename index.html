@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ASH ACADEMY — BI Dashboard</title>
+  <!-- Dashboard Brand Favicon ("A" Logo) -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Ctext x='50%25' y='53%25' dominant-baseline='central' text-anchor='middle' fill='%23ffffff' font-family='Inter, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif' font-weight='900' font-size='38'%3EA%3C/text%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Ctext x='50%25' y='53%25' dominant-baseline='central' text-anchor='middle' fill='%23ffffff' font-family='Inter, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif' font-weight='900' font-size='38'%3EA%3C/text%3E%3C/svg%3E">
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Chart.js CDN -->
@@ -2522,15 +2525,15 @@
 
   <!-- DASHBOARD JAVASCRIPT LOGIC -->
   <script>
-    // Firebase Cloud Configuration
-    const firebaseConfig = {
-      apiKey: "AIzaSyCruCfmmN68FTMSkYNGOOGoJTa3lRulFfY",
-      authDomain: "dashboard-cloud-4bdfa.firebaseapp.com",
-      projectId: "dashboard-cloud-4bdfa",
-      storageBucket: "dashboard-cloud-4bdfa.firebasestorage.app",
-      messagingSenderId: "834224617420",
-      appId: "1:834224617420:web:d01a0340c9d1bf0e790f69",
-      measurementId: "G-C0BS82EY8Y"
+    // Firebase Cloud Configuration (Populated dynamically via /api/env or .env)
+    let firebaseConfig = {
+      apiKey: "",
+      authDomain: "",
+      projectId: "",
+      storageBucket: "",
+      messagingSenderId: "",
+      appId: "",
+      measurementId: ""
     };
 
     let firebaseApp = null;
@@ -2539,6 +2542,7 @@
 
     function initFirebaseModule() {
       if (isFirebaseReady) return;
+      if (!firebaseConfig || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
       try {
         if (typeof firebase !== 'undefined' && firebase.initializeApp) {
           if (!firebase.apps || !firebase.apps.length) {
@@ -2639,6 +2643,7 @@
 
     // Save Employee Status to Firebase Cloud Firestore (SDK + REST Fallback)
     async function saveEmployeeStatusToFirebase() {
+      await initEnvConfig();
       initFirebaseModule();
       const cleanStatuses = normalizeEmployeeStatusMap(employeeStatusCache || {});
       employeeStatusCache = Object.assign({}, cleanStatuses);
@@ -2661,20 +2666,22 @@
       }
 
       // Also persist via Firestore REST API to guarantee cloud sync
-      try {
-        const restFields = {};
-        for (const [k, v] of Object.entries(payload)) {
-          restFields[k] = toFirestoreRestValue(v);
+      if (firebaseConfig.projectId && firebaseConfig.apiKey) {
+        try {
+          const restFields = {};
+          for (const [k, v] of Object.entries(payload)) {
+            restFields[k] = toFirestoreRestValue(v);
+          }
+          const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
+          const res = await fetch(restUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: restFields })
+          });
+          if (res.ok) saved = true;
+        } catch (e) {
+          console.warn('REST write to ash_settings/employee_status warning:', e);
         }
-        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
-        const res = await fetch(restUrl, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: restFields })
-        });
-        if (res.ok) saved = true;
-      } catch (e) {
-        console.warn('REST write to ash_settings/employee_status warning:', e);
       }
 
       return saved;
@@ -2701,6 +2708,7 @@
 
     // Load Employee Status from Firebase Cloud Firestore (SDK + REST Fallback)
     async function loadEmployeeStatusFromFirebase() {
+      await initEnvConfig();
       initFirebaseModule();
       if (isFirebaseReady && firestoreDb) {
         try {
@@ -2717,19 +2725,21 @@
         }
       }
 
-      try {
-        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
-        const res = await fetch(restUrl);
-        if (res.ok) {
-          const docJson = await res.json();
-          const data = fromFirestoreRestDocument(docJson);
-          if (applyIncomingFirebaseEmployeeStatus(data)) {
-            console.log('Employee status synced from Firebase Cloud Firestore (REST).');
-            return true;
+      if (firebaseConfig.projectId && firebaseConfig.apiKey) {
+        try {
+          const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_settings/employee_status?key=' + firebaseConfig.apiKey;
+          const res = await fetch(restUrl);
+          if (res.ok) {
+            const docJson = await res.json();
+            const data = fromFirestoreRestDocument(docJson);
+            if (applyIncomingFirebaseEmployeeStatus(data)) {
+              console.log('Employee status synced from Firebase Cloud Firestore (REST).');
+              return true;
+            }
           }
+        } catch (e) {
+          console.warn('Failed to load employee status from Firebase REST:', e);
         }
-      } catch (e) {
-        console.warn('Failed to load employee status from Firebase REST:', e);
       }
       return false;
     }
@@ -2760,6 +2770,7 @@
     // Save Live Dashboard Data to Firebase Cloud Firestore (Dashboard -> Firebase)
     async function saveLiveDashboardDataToFirebase(liveData) {
       if (!liveData || !liveData.sheets) return false;
+      await initEnvConfig();
       initFirebaseModule();
 
       const sanitizedSheets = JSON.parse(JSON.stringify(liveData.sheets));
@@ -2781,29 +2792,32 @@
         }
       }
 
-      try {
-        const restFields = {};
-        for (const [k, v] of Object.entries(payload)) {
-          restFields[k] = toFirestoreRestValue(v);
+      if (firebaseConfig.projectId && firebaseConfig.apiKey) {
+        try {
+          const restFields = {};
+          for (const [k, v] of Object.entries(payload)) {
+            restFields[k] = toFirestoreRestValue(v);
+          }
+          const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
+          const res = await fetch(restUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: restFields })
+          });
+          if (res.ok) {
+            console.log('Live dashboard data successfully cached to Firebase Cloud Firestore (REST).');
+            return true;
+          }
+        } catch (e) {
+          console.warn('Failed to cache dashboard data to Firebase REST:', e);
         }
-        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
-        const res = await fetch(restUrl, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: restFields })
-        });
-        if (res.ok) {
-          console.log('Live dashboard data successfully cached to Firebase Cloud Firestore (REST).');
-          return true;
-        }
-      } catch (e) {
-        console.warn('Failed to cache dashboard data to Firebase REST:', e);
       }
       return false;
     }
 
     // Load Live Dashboard Data from Firebase Cloud Firestore (Firebase -> Dashboard)
     async function loadLiveDashboardDataFromFirebase() {
+      await initEnvConfig();
       initFirebaseModule();
       if (isFirebaseReady && firestoreDb) {
         try {
@@ -2819,18 +2833,20 @@
         }
       }
 
-      try {
-        const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
-        const res = await fetch(restUrl);
-        if (res.ok) {
-          const docJson = await res.json();
-          const data = fromFirestoreRestDocument(docJson);
-          if (data && data.sheets && typeof data.sheets === 'object') {
-            return data;
+      if (firebaseConfig.projectId && firebaseConfig.apiKey) {
+        try {
+          const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/ash_dashboard/latest_data?key=' + firebaseConfig.apiKey;
+          const res = await fetch(restUrl);
+          if (res.ok) {
+            const docJson = await res.json();
+            const data = fromFirestoreRestDocument(docJson);
+            if (data && data.sheets && typeof data.sheets === 'object') {
+              return data;
+            }
           }
+        } catch (e) {
+          console.warn('Firebase REST dashboard cache load warning:', e);
         }
-      } catch (e) {
-        console.warn('Firebase REST dashboard cache load warning:', e);
       }
       return null;
     }
@@ -2957,6 +2973,21 @@
       return normalizeAshUser(raw);
     }
 
+    function getFounderSortRank(u) {
+      if (!u) return 99;
+      const uname = (u.username || '').toLowerCase();
+      const roleLower = (u.role || '').toLowerCase();
+      if (uname === 'sufailash' && roleLower.includes('founder')) return 0;
+      if (roleLower.includes('founder')) return 1;
+      if (uname === 'sufailash') return 2;
+      return 10;
+    }
+
+    function sortUsersFounderFirst(list) {
+      if (!Array.isArray(list)) return [];
+      return [...list].sort((a, b) => getFounderSortRank(a) - getFounderSortRank(b));
+    }
+
     function deduplicateUsersList(list) {
       const seen = new Set();
       const result = [];
@@ -2968,7 +2999,7 @@
           result.push(item);
         }
       }
-      return result;
+      return sortUsersFounderFirst(result);
     }
 
     function extractUsersFromDocData(data) {
@@ -3037,6 +3068,7 @@
         return userManagementCache;
       }
 
+      await initEnvConfig();
       initFirebaseModule();
 
       // 1. Try SDK firestoreDb querying document 'ash-user' or 'users'
@@ -3063,28 +3095,30 @@
       }
 
       // 2. Try Firestore REST API fallback on 'ash-user' and 'users'
-      const restPaths = [
-        'ash_settings/ash-user',
-        'ash_settings/users',
-        'ash_dashboard/ash-user'
-      ];
+      if (firebaseConfig.projectId && firebaseConfig.apiKey) {
+        const restPaths = [
+          'ash_settings/ash-user',
+          'ash_settings/users',
+          'ash_dashboard/ash-user'
+        ];
 
-      for (const p of restPaths) {
-        try {
-          const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/' + p + '?key=' + firebaseConfig.apiKey;
-          const res = await fetch(restUrl);
-          if (res.ok) {
-            const data = await res.json();
-            if (data && data.fields) {
-              const list = extractUsersFromRestFields(data.fields);
-              if (list.length > 0) {
-                userManagementCache = list;
-                updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
-                return userManagementCache;
+        for (const p of restPaths) {
+          try {
+            const restUrl = 'https://firestore.googleapis.com/v1/projects/' + firebaseConfig.projectId + '/databases/(default)/documents/' + p + '?key=' + firebaseConfig.apiKey;
+            const res = await fetch(restUrl);
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.fields) {
+                const list = extractUsersFromRestFields(data.fields);
+                if (list.length > 0) {
+                  userManagementCache = list;
+                  updateUsersFirebaseSyncBadge('synced', 'Synced • Firebase ash-user');
+                  return userManagementCache;
+                }
               }
             }
-          }
-        } catch (e) {}
+          } catch (e) {}
+        }
       }
 
       if (!userManagementCache || userManagementCache.length === 0) {
@@ -3158,6 +3192,7 @@
     }
 
     async function saveFirebaseUser(userData, isEdit) {
+      await initEnvConfig();
       initFirebaseModule();
       updateUsersFirebaseSyncBadge('syncing', 'Saving to Firebase...');
       const currentUsers = await getFirebaseUsers(true);
@@ -3232,6 +3267,8 @@
         updatedList = [...currentUsers, newUser];
       }
 
+      updatedList = sortUsersFounderFirst(updatedList);
+
       // Build payload containing canonical 'users' array + individual user keys
       const payload = {
         users: updatedList,
@@ -3282,6 +3319,7 @@
     }
 
     async function deleteFirebaseUser(username) {
+      await initEnvConfig();
       initFirebaseModule();
       updateUsersFirebaseSyncBadge('syncing', 'Deleting from Firebase...');
       const currentUsers = await getFirebaseUsers(true);
@@ -3299,7 +3337,7 @@
         throw new Error('Cannot delete the last administrator account.');
       }
 
-      const updatedList = currentUsers.filter(u => u.username.toLowerCase() !== target);
+      const updatedList = sortUsersFounderFirst(currentUsers.filter(u => u.username.toLowerCase() !== target));
 
       const payload = {
         users: updatedList,
@@ -3333,6 +3371,7 @@
     }
 
     async function saveAshUsersViaRestApi(usersList, fullPayload = null) {
+      if (!firebaseConfig.projectId || !firebaseConfig.apiKey) return false;
       const fieldsObj = fullPayload || { users: usersList, updatedAt: new Date().toISOString() };
       const fields = {};
       for (const [k, v] of Object.entries(fieldsObj)) {
@@ -3447,8 +3486,8 @@
         else searchClear.classList.add('hidden');
       }
 
-      const users = userManagementCache || [];
-      const filtered = users.filter(u => {
+      const users = sortUsersFounderFirst(userManagementCache || []);
+      const filtered = sortUsersFounderFirst(users.filter(u => {
         const matchQuery = !query || 
           (u.fullName && u.fullName.toLowerCase().includes(query)) ||
           (u.username && u.username.toLowerCase().includes(query)) ||
@@ -3468,7 +3507,7 @@
           return !r.includes('founder') && !r.includes('admin') && !r.includes('academic') && !r.includes('hr');
         }
         return true;
-      });
+      }));
 
       if (countLabel) {
         countLabel.innerText = `Showing ${filtered.length} of ${users.length} users`;
@@ -3831,7 +3870,7 @@
       }
     }
 
-    // Environment API Variables (loaded dynamically from serverless proxy, .env locally, or Vercel environment variables)
+    // Environment API Variables (loaded dynamically from serverless /api/env, /api/data, or local .env)
     let API_URL = '/api/data';
     let AUTH_API_URL = '';
     let envConfigLoaded = false;
@@ -3839,17 +3878,7 @@
     async function initEnvConfig() {
       if (envConfigLoaded) return;
 
-      // 1. Try secure Vercel /api/data endpoint directly to test proxy support
-      try {
-        const testProxy = await fetch('/api/data', { method: 'OPTIONS' }).catch(() => null);
-        if (testProxy && (testProxy.ok || testProxy.status === 200 || testProxy.status === 204)) {
-          API_URL = '/api/data';
-          envConfigLoaded = true;
-          return;
-        }
-      } catch(e) {}
-
-      // 2. Try Vercel Serverless Function /api/env
+      // 1. Fetch runtime environment variables from Vercel Serverless Function (/api/env)
       try {
         const envRes = await fetch('/api/env');
         if (envRes.ok) {
@@ -3857,17 +3886,27 @@
           if (envData.dataPath) API_URL = envData.dataPath;
           else if (envData.API_URL || envData.DASHBOARD_API_URL) API_URL = envData.API_URL || envData.DASHBOARD_API_URL;
           if (envData.AUTH_API_URL) AUTH_API_URL = envData.AUTH_API_URL;
-          envConfigLoaded = true;
-          return;
+          if (envData.firebaseConfig && typeof envData.firebaseConfig === 'object') {
+            Object.keys(envData.firebaseConfig).forEach(k => {
+              if (envData.firebaseConfig[k]) {
+                firebaseConfig[k] = envData.firebaseConfig[k];
+              }
+            });
+          }
+          if (firebaseConfig.apiKey && firebaseConfig.projectId) {
+            envConfigLoaded = true;
+            initFirebaseModule();
+            return;
+          }
         }
       } catch (e) {}
 
-      // 3. Try local .env file (Active when running locally with .env in project folder)
+      // 2. Try local .env file (Active when running locally with .env in project folder)
       try {
         const envRes = await fetch('.env');
         if (envRes.ok) {
           const text = await envRes.text();
-          if (text && !text.includes('<!DOCTYPE') && (text.includes('API_URL') || text.includes('='))) {
+          if (text && !text.includes('<!DOCTYPE') && (text.includes('API_URL') || text.includes('FIREBASE_') || text.includes('='))) {
             const lines = text.split('\n');
             lines.forEach(line => {
               const trimmed = line.trim();
@@ -3878,22 +3917,35 @@
                   const val = trimmed.substring(eqIdx + 1).trim().replace(/^['"]|['"]$/g, '');
                   if (key === 'API_URL' || key === 'DASHBOARD_API_URL') API_URL = val;
                   if (key === 'AUTH_API_URL') AUTH_API_URL = val;
+                  if (key === 'FIREBASE_API_KEY') firebaseConfig.apiKey = val;
+                  if (key === 'FIREBASE_AUTH_DOMAIN') firebaseConfig.authDomain = val;
+                  if (key === 'FIREBASE_PROJECT_ID') firebaseConfig.projectId = val;
+                  if (key === 'FIREBASE_STORAGE_BUCKET') firebaseConfig.storageBucket = val;
+                  if (key === 'FIREBASE_MESSAGING_SENDER_ID') firebaseConfig.messagingSenderId = val;
+                  if (key === 'FIREBASE_APP_ID') firebaseConfig.appId = val;
+                  if (key === 'FIREBASE_MEASUREMENT_ID') firebaseConfig.measurementId = val;
                 }
               }
             });
             envConfigLoaded = true;
+            initFirebaseModule();
             return;
           }
         }
       } catch (e) {
-        // .env not present or deleted before upload
+        // .env not present or running in production
       }
 
-      // 4. Default fallback (keeps app working if opened directly offline)
-      if (!API_URL || API_URL === '/api/data') {
-        API_URL = 'https://script.google.com/macros/s/AKfycby7qBr4g875SW3-_mIQB8yunRia3mQ4sgnwwQOLUkiGYYmDWpIHQwGxZoAwzPXkjr61sw/exec';
-      }
+      // 3. Test secure Vercel /api/data proxy endpoint
+      try {
+        const testProxy = await fetch('/api/data', { method: 'OPTIONS' }).catch(() => null);
+        if (testProxy && (testProxy.ok || testProxy.status === 200 || testProxy.status === 204)) {
+          API_URL = '/api/data';
+        }
+      } catch (e) {}
+
       envConfigLoaded = true;
+      initFirebaseModule();
     }
 
     let currentUser = null;
@@ -4729,10 +4781,10 @@
     document.addEventListener('DOMContentLoaded', async () => {
       initTheme();
       initSidebarState();
-      initFirebaseModule();
-      initEmployeeStatusModule();
       updateAllSyncUI('normal');
       await initEnvConfig();
+      initFirebaseModule();
+      initEmployeeStatusModule();
       initAuth();
 
       document.addEventListener('fullscreenchange', onFullScreenChange);
